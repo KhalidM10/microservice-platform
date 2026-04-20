@@ -45,8 +45,12 @@ async def proxy_request(
     if query:
         full_url = f"{full_url}?{query}"
 
-    headers = dict(request.headers)
-    headers.pop("host", None)
+    # Strip headers that must not be forwarded, sanitize values (remove \r\n)
+    headers = {
+        k: v.replace("\r", "").replace("\n", "")
+        for k, v in request.headers.items()
+        if k.lower() not in ("host", "transfer-encoding")
+    }
 
     correlation_id = getattr(request.state, "correlation_id", "")
     if correlation_id:

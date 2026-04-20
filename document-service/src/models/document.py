@@ -15,14 +15,12 @@ class JSONArray(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
-        if dialect.name == "postgresql":
-            return value
         return json.dumps(value)
 
     def process_result_value(self, value, dialect):
         if value is None:
             return None
-        if dialect.name == "postgresql":
+        if isinstance(value, list):
             return value
         return json.loads(value)
 
