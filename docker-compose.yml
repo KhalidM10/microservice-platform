@@ -109,10 +109,18 @@ services:
       AUTH_SERVICE_URL: http://auth-service:8000
       DOCUMENT_SERVICE_URL: http://document-service:8000
       NOTIFICATION_SERVICE_URL: http://notification-service:8000
-      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:5000","http://localhost:8080"]'
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5000:80"
+    depends_on:
+      - api-gateway
     restart: unless-stopped
 
   prometheus:

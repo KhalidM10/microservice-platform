@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DocPlatform — AI Document Management</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ================================================
+       AUTH SCREEN
+       ================================================ -->
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-card">
+      <div class="auth-logo">
+        <div class="auth-logo-icon">📚</div>
+        <h1>DocPlatform</h1>
+        <p>AI-powered document management</p>
+      </div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-tab="login">Sign In</button>
+        <button class="auth-tab" data-tab="register">Register</button>
+      </div>
+
+      <!-- Login Form -->
+      <form id="login-form" class="auth-form">
+        <div class="form-group">
+          <label for="login-email">Email</label>
+          <input id="login-email" type="email" name="email" class="form-input"
+                 placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" name="password" class="form-input"
+                 placeholder="••••••••" required autocomplete="current-password">
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+      </form>
+
+      <!-- Register Form -->
+      <form id="register-form" class="auth-form hidden">
+        <div class="form-group">
+          <label for="reg-name">Full Name</label>
+          <input id="reg-name" type="text" name="full_name" class="form-input"
+                 placeholder="Your full name" required autocomplete="name">
+        </div>
+        <div class="form-group">
+          <label for="reg-email">Email</label>
+          <input id="reg-email" type="email" name="email" class="form-input"
+                 placeholder="you@example.com" required autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label for="reg-pw">Password <span class="label-hint">(min 8 chars)</span></label>
+          <input id="reg-pw" type="password" name="password" class="form-input"
+                 placeholder="••••••••" required minlength="8" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label for="reg-pw2">Confirm Password</label>
+          <input id="reg-pw2" type="password" name="password2" class="form-input"
+                 placeholder="••••••••" required autocomplete="new-password">
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Create Account</button>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- ================================================
+       APP SHELL
+       ================================================ -->
+  <div id="app-shell" class="app-shell hidden">
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-logo">📚 DocPlatform</span>
+        <button class="sidebar-close" id="sidebar-close" title="Close">✕</button>
+      </div>
+      <nav class="sidebar-nav">
+        <a class="nav-item active" data-view="documents" href="#">
+          <span class="nav-icon">📄</span>
+          <span>Documents</span>
+        </a>
+        <a class="nav-item" data-view="search" href="#">
+          <span class="nav-icon">🔍</span>
+          <span>Search</span>
+        </a>
+        <a class="nav-item" data-view="notifications" href="#">
+          <span class="nav-icon">🔔</span>
+          <span>Notifications</span>
+          <span class="badge hidden" id="notif-badge">0</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-user">
+          <div class="avatar" id="sidebar-avatar">U</div>
+          <div class="sidebar-user-info">
+            <span class="sidebar-user-name" id="sidebar-user-name">User</span>
+            <span class="sidebar-user-role" id="sidebar-user-role">user</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Mobile overlay -->
+    <div class="sidebar-overlay hidden" id="sidebar-overlay"></div>
+
+    <!-- Main content area -->
+    <div class="main-wrapper">
+      <header class="header">
+        <button class="hamburger" id="hamburger" title="Open menu">
+          <span></span><span></span><span></span>
+        </button>
+        <h1 class="page-title" id="page-title">Documents</h1>
+        <div class="header-right">
+          <span class="header-user" id="header-user"></span>
+          <button class="btn btn-outline btn-sm" id="logout-btn">Logout</button>
+        </div>
+      </header>
+
+      <main class="content" id="content">
+        <!-- Views rendered here -->
+      </main>
+    </div>
+
+  </div>
+
+
+  <!-- ================================================
+       MODAL
+       ================================================ -->
+  <div class="modal-backdrop hidden" id="modal-backdrop">
+    <div class="modal" id="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2 id="modal-title" class="modal-title"></h2>
+        <button class="modal-close" id="modal-close" title="Close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+
+  <!-- ================================================
+       TOAST NOTIFICATIONS
+       ================================================ -->
+  <div id="toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
