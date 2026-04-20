@@ -34,8 +34,18 @@ spec:
                 secretKeyRef:
                   name: platform-secrets
                   key: rabbitmq-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: redis-url
             - name: APP_NAME
               value: "document-service"
+            - name: APP_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: APP_VERSION
             - name: DEBUG
               value: "false"
           livenessProbe:
@@ -52,8 +62,8 @@ spec:
             periodSeconds: 5
           resources:
             requests:
-              memory: "128Mi"
+              memory: "256Mi"
               cpu: "100m"
             limits:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "500m"

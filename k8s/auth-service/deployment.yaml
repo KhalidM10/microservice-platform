@@ -31,6 +31,11 @@ spec:
                   key: secret-key
             - name: APP_NAME
               value: "auth-service"
+            - name: APP_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: APP_VERSION
             - name: DEBUG
               value: "false"
           livenessProbe:

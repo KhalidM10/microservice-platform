@@ -36,6 +36,11 @@ spec:
                   key: rabbitmq-url
             - name: APP_NAME
               value: "notification-service"
+            - name: APP_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: APP_VERSION
             - name: DEBUG
               value: "false"
           livenessProbe:

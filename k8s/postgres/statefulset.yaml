@@ -33,31 +33,36 @@ spec:
             - name: POSTGRES_DB
               value: "documents"
           volumeMounts:
-            - name: postgres-storage
+            - name: postgres-data
               mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "postgres"]
             initialDelaySeconds: 30
             periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: init-scripts
+          configMap:
+            name: postgres-init
   volumeClaimTemplates:
     - metadata:
-        name: postgres-storage
+        name: postgres-data
       spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 5Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: microservice-platform
-spec:
-  selector:
-    app: postgres
-  ports:
-    - port: 5432
-      targetPort: 5432
-  type: ClusterIP

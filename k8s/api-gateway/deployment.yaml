@@ -24,16 +24,40 @@ spec:
                 secretKeyRef:
                   name: platform-secrets
                   key: secret-key
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: redis-url
             - name: APP_NAME
               value: "api-gateway"
+            - name: APP_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: APP_VERSION
             - name: DEBUG
               value: "false"
             - name: AUTH_SERVICE_URL
-              value: "http://auth-service:8000"
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: AUTH_SERVICE_URL
             - name: DOCUMENT_SERVICE_URL
-              value: "http://document-service:8000"
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: DOCUMENT_SERVICE_URL
             - name: NOTIFICATION_SERVICE_URL
-              value: "http://notification-service:8000"
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: NOTIFICATION_SERVICE_URL
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: CORS_ORIGINS
           livenessProbe:
             httpGet:
               path: /health
