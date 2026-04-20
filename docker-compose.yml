@@ -1,0 +1,144 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-documents}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-password}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  document-service:
+    build: ./document-service
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: ${DOCUMENT_DATABASE_URL:-postgresql+asyncpg://postgres:changeme@postgres:5432/documents}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+      DEBUG: "true"
+      APP_NAME: document-service
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:password@rabbitmq:5672/}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  auth-service:
+    build: ./auth-service
+    environment:
+      DATABASE_URL: ${AUTH_DATABASE_URL:-postgresql+asyncpg://postgres:changeme@postgres:5432/auth}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+      DEBUG: "true"
+      APP_NAME: auth-service
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notification-service:
+    build: ./notification-service
+    environment:
+      DATABASE_URL: ${NOTIFICATION_DATABASE_URL:-postgresql+asyncpg://postgres:changeme@postgres:5432/notifications}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+      DEBUG: "true"
+      APP_NAME: notification-service
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:password@rabbitmq:5672/}
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8080:8000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+      DEBUG: "true"
+      APP_NAME: api-gateway
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      AUTH_SERVICE_URL: http://auth-service:8000
+      DOCUMENT_SERVICE_URL: http://document-service:8000
+      NOTIFICATION_SERVICE_URL: http://notification-service:8000
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  grafana_data:
