@@ -14,7 +14,13 @@ class SecurityHeadersMiddleware:
                 headers[b"x-frame-options"] = b"DENY"
                 headers[b"x-xss-protection"] = b"1; mode=block"
                 headers[b"strict-transport-security"] = b"max-age=31536000; includeSubDomains"
-                headers[b"content-security-policy"] = b"default-src 'self'"
+                headers[b"content-security-policy"] = (
+                    b"default-src 'self'; "
+                    b"script-src 'self' 'unsafe-inline' cdn.jsdelivr.net unpkg.com; "
+                    b"style-src 'self' 'unsafe-inline' cdn.jsdelivr.net unpkg.com; "
+                    b"img-src 'self' data:; "
+                    b"connect-src 'self'"
+                )
                 headers[b"referrer-policy"] = b"strict-origin-when-cross-origin"
                 message["headers"] = list(headers.items())
             await send(message)
