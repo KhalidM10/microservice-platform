@@ -4,94 +4,260 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy to Kubernetes after build"
+        type: boolean
+        default: false
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: docker.io
+  IMAGE_PREFIX: ${{ secrets.DOCKER_USERNAME }}/mindcampus
+
+# ─────────────────────────────────────────────────────────────
+# JOB 1 — Test all Python services in parallel
+# ─────────────────────────────────────────────────────────────
 jobs:
   test:
-    name: Test ${{ matrix.service }}
+    name: Test / ${{ matrix.service }}
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
-        service:
-          - document-service
-          - auth-service
-          - notification-service
-          - api-gateway
+        include:
+          - service: document-service
+            coverage_min: 80
+          - service: auth-service
+            coverage_min: 80
+          - service: notification-service
+            coverage_min: 80
+          - service: api-gateway
+            coverage_min: 80
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.service }}-${{ hashFiles(format('{0}/requirements.txt', matrix.service)) }}
+          restore-keys: pip-${{ matrix.service }}-
+
       - name: Install dependencies
         run: |
-          cd ${{ matrix.service }}
-          pip install -r requirements.txt
+          pip install -r ${{ matrix.service }}/requirements.txt
 
-      - name: Run tests
+      - name: Run tests with coverage
         env:
-          DATABASE_URL: sqlite+aiosqlite:///./test.db
-          SECRET_KEY: ci-test-secret-key
-          APP_NAME: ${{ matrix.service }}
-          APP_VERSION: "1.0.0"
-          RABBITMQ_URL: amqp://guest:guest@localhost:5672/
-          REDIS_URL: redis://localhost:6379
+          DATABASE_URL:   "sqlite+aiosqlite:///./test.db"
+          SECRET_KEY:     "ci-test-secret-key-do-not-use-in-production"
+          APP_NAME:       "${{ matrix.service }}"
+          APP_VERSION:    "1.0.0"
+          RABBITMQ_URL:   "amqp://guest:guest@localhost:5672/"
+          REDIS_URL:      "redis://localhost:6379"
         run: |
           cd ${{ matrix.service }}
-          pytest tests/ --cov=src --cov-report=xml --cov-fail-under=70
+          pytest tests/ -v \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=${{ matrix.coverage_min }}
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
         with:
           file: ${{ matrix.service }}/coverage.xml
           flags: ${{ matrix.service }}
+          name: ${{ matrix.service }}
         continue-on-error: true
 
-  build-and-push:
-    name: Build and Push Docker Images
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2 — Lint (fast check before building images)
+  # ─────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-lint-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Install linters
+        run: pip install ruff
+
+      - name: Ruff check
+        run: |
+          ruff check \
+            document-service/src \
+            auth-service/src \
+            notification-service/src \
+            api-gateway/src \
+            --select E,F,W \
+            --ignore E501,W291,W293 \
+            --output-format github \
+            || true   # non-blocking: report but don't fail build
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3 — Build & push Docker images (push events on main/develop only)
+  # ─────────────────────────────────────────────────────────────
+  build:
+    name: Build / ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
     strategy:
+      fail-fast: false
       matrix:
         service:
           - document-service
           - auth-service
           - notification-service
           - api-gateway
+          - frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Login to Docker Hub
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: ./${{ matrix.service }}
           push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/mindcampus-${{ matrix.service }}:latest
-            ${{ secrets.DOCKER_USERNAME }}/mindcampus-${{ matrix.service }}:${{ github.sha }}
+          tags:   ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to:   type=gha,scope=${{ matrix.service }},mode=max
 
+  # ─────────────────────────────────────────────────────────────
+  # JOB 4 — Deploy to Kubernetes (main branch + on-demand only)
+  # ─────────────────────────────────────────────────────────────
   deploy:
     name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: build-and-push
-    if: github.ref == 'refs/heads/main'
+    needs: [build]
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
+    environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Deploy
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
         run: |
-          echo "Deploying to Kubernetes..."
-          echo "kubectl apply -f k8s/namespace.yaml"
-          echo "kubectl apply -f k8s/"
-          echo "Images tagged with SHA: ${{ github.sha }}"
+          mkdir -p ~/.kube
+          echo "$KUBECONFIG_B64" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connection
+        run: kubectl cluster-info
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/postgres/init-configmap.yaml
+          kubectl apply -f k8s/postgres/
+          kubectl apply -f k8s/rabbitmq/
+          kubectl apply -f k8s/redis/
+          kubectl apply -f k8s/auth-service/
+          kubectl apply -f k8s/document-service/
+          kubectl apply -f k8s/notification-service/
+          kubectl apply -f k8s/api-gateway/
+          kubectl apply -f k8s/frontend/
+
+      - name: Update images to new SHA
+        env:
+          SHA: ${{ github.sha }}
+          DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          SHORT_SHA="${SHA::7}"
+          NS="microservice-platform"
+          for svc in auth-service document-service notification-service api-gateway frontend; do
+            kubectl set image deployment/$svc $svc=${DOCKER_USER}/mindcampus-${svc}:${SHORT_SHA} \
+              -n $NS --record 2>/dev/null || true
+          done
+
+      - name: Wait for rollout
+        run: |
+          NS="microservice-platform"
+          for svc in auth-service document-service notification-service api-gateway frontend; do
+            kubectl rollout status deployment/$svc -n $NS --timeout=120s
+          done
+
+      - name: Smoke test
+        run: |
+          GW_IP=$(kubectl get svc api-gateway -n microservice-platform \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [[ -n "$GW_IP" ]]; then
+            curl -sf "http://${GW_IP}/health" | grep -q "healthy"
+            echo "Gateway health check passed"
+          else
+            echo "LoadBalancer IP not yet assigned — skipping smoke test"
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Image |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA::7}"
+          for svc in auth-service document-service notification-service api-gateway frontend; do
+            echo "| $svc | ${{ secrets.DOCKER_USERNAME }}/mindcampus-${svc}:${SHORT_SHA} |" \
+              >> $GITHUB_STEP_SUMMARY
+          done
+          kubectl get pods -n microservice-platform >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
