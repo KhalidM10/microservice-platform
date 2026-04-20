@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Platform Dashboards
+    orgId: 1
+    folder: MindCampus
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

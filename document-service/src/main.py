@@ -61,6 +61,13 @@ app.add_middleware(
 
 Instrumentator().instrument(app).expose(app)
 
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+_tracer_provider = TracerProvider()
+trace.set_tracer_provider(_tracer_provider)
+FastAPIInstrumentor.instrument_app(app)
+
 app.include_router(documents_router, prefix=settings.API_PREFIX)
 
 
