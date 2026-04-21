@@ -3,6 +3,18 @@
    ============================================================ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+[data-theme="dark"] {
+  --primary-light: #1E1B4B;
+  --bg:            #0F172A;
+  --surface:       #1E293B;
+  --surface-2:     #263347;
+  --border:        #334155;
+  --border-hover:  #475569;
+  --text:          #F1F5F9;
+  --text-muted:    #94A3B8;
+  --text-light:    #64748B;
+}
+
 :root {
   --primary:       #4F46E5;
   --primary-hover: #4338CA;
@@ -870,6 +882,135 @@ body {
 .toast-error   { background: var(--danger);  color: #fff; }
 .toast-info    { background: var(--primary); color: #fff; }
 .toast-warning { background: var(--warning); color: #fff; }
+
+/* ============================================================
+   DARK TOGGLE BUTTON
+   ============================================================ */
+.sidebar-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dark-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--text-muted);
+  transition: background var(--transition), border-color var(--transition);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.dark-toggle:hover {
+  background: var(--bg);
+  border-color: var(--border-hover);
+  color: var(--text);
+}
+
+/* ============================================================
+   TAG FILTER BAR
+   ============================================================ */
+.tag-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+.tag-filter-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+.tag-filter-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+.tag-filter-btn:hover { border-color: var(--primary); color: var(--primary); }
+.tag-filter-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+/* Clickable tags inside doc cards */
+.tag-clickable {
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), transform var(--transition);
+}
+.tag-clickable:hover { filter: brightness(0.9); transform: scale(1.05); }
+.tag-active {
+  background: var(--primary) !important;
+  color: #fff !important;
+}
+
+/* ============================================================
+   PAGINATION
+   ============================================================ */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 28px;
+  flex-wrap: wrap;
+}
+.pagination .btn { min-width: 80px; }
+.page-info {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   RICH EDITOR META
+   ============================================================ */
+.editor-wrap { position: relative; }
+
+.editor-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  min-height: 22px;
+}
+.word-count, .char-count {
+  font-size: 12px;
+  color: var(--text-light);
+}
+.draft-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  border: 1px solid #FDE68A;
+}
+.draft-saved-indicator {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--success);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 
 /* ============================================================
    RESPONSIVE — TABLET  (≤ 1024px)
