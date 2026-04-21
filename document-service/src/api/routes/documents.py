@@ -18,7 +18,7 @@ async def create_document(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    owner_id = token.get("sub")
+    owner_id = token["sub"]
     doc = await document_service.create_document(db, data, owner_id=owner_id)
 
     from src.core.publisher import publish_document_created
@@ -34,7 +34,8 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    return await document_service.list_documents(db, skip=skip, limit=limit)
+    owner_id = token["sub"]
+    return await document_service.list_documents(db, owner_id=owner_id, skip=skip, limit=limit)
 
 
 @router.get("/search", response_model=List[DocumentResponse])
@@ -43,7 +44,8 @@ async def search_documents(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    return await document_service.search_documents(db, q)
+    owner_id = token["sub"]
+    return await document_service.search_documents(db, q, owner_id=owner_id)
 
 
 @router.post("/search/semantic")
@@ -52,7 +54,8 @@ async def semantic_search_endpoint(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    docs = await document_service.list_documents(db, skip=0, limit=1000)
+    owner_id = token["sub"]
+    docs = await document_service.list_documents(db, owner_id=owner_id, skip=0, limit=1000)
     return await semantic_search(docs, data.query, data.limit)
 
 
@@ -62,7 +65,8 @@ async def get_document(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    doc = await document_service.get_document(db, doc_id)
+    owner_id = token["sub"]
+    doc = await document_service.get_document(db, doc_id, owner_id=owner_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
@@ -75,7 +79,8 @@ async def update_document(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    doc = await document_service.update_document(db, doc_id, data)
+    owner_id = token["sub"]
+    doc = await document_service.update_document(db, doc_id, data, owner_id=owner_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
@@ -87,7 +92,8 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    doc = await document_service.soft_delete_document(db, doc_id)
+    owner_id = token["sub"]
+    doc = await document_service.soft_delete_document(db, doc_id, owner_id=owner_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
@@ -100,7 +106,8 @@ async def summarize(
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
-    doc = await document_service.get_document(db, doc_id)
+    owner_id = token["sub"]
+    doc = await document_service.get_document(db, doc_id, owner_id=owner_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return await summarize_document(doc, data.max_length)

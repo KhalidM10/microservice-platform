@@ -21,7 +21,15 @@ engine_test = create_async_engine(
 )
 TestSessionLocal = async_sessionmaker(engine_test, expire_on_commit=False)
 
-FAKE_TOKEN_PAYLOAD = {"sub": "user-test-123", "role": "user", "type": "access"}
+USER_A_TOKEN = {"sub": "user-a-123", "role": "user", "type": "access"}
+USER_B_TOKEN = {"sub": "user-b-456", "role": "user", "type": "access"}
+
+
+async def _client_for(token_payload):
+    """Return a configured AsyncClient for the given token. Must be used as async context manager."""
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_token] = lambda: token_payload
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 async def override_get_db():
@@ -36,8 +44,11 @@ async def override_get_db():
             await session.close()
 
 
-def override_verify_token():
-    return FAKE_TOKEN_PAYLOAD
+def override_verify_token_a():
+    return USER_A_TOKEN
+
+def override_verify_token_b():
+    return USER_B_TOKEN
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -51,12 +62,14 @@ async def setup_db():
 
 @pytest_asyncio.fixture
 async def client():
+    """Client authenticated as user A."""
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[verify_token] = override_verify_token
+    app.dependency_overrides[verify_token] = override_verify_token_a
     with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             yield ac
     app.dependency_overrides.clear()
+
 
 
 @pytest_asyncio.fixture
@@ -65,6 +78,8 @@ async def db_session():
         yield session
         await session.rollback()
 
+
+# ─── Basic CRUD ──────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_create_document_valid(client):
@@ -77,7 +92,7 @@ async def test_create_document_valid(client):
     data = response.json()
     assert data["title"] == "Test Document"
     assert data["id"] is not None
-    assert data["owner_id"] == "user-test-123"
+    assert data["owner_id"] == USER_A_TOKEN["sub"]
 
 
 @pytest.mark.asyncio
@@ -96,21 +111,42 @@ async def test_create_document_no_auth():
 
 
 @pytest.mark.asyncio
-async def test_list_documents(client):
-    await client.post("/api/v1/documents", json={"title": "Doc 1", "content": "Content 1"})
-    await client.post("/api/v1/documents", json={"title": "Doc 2", "content": "Content 2"})
-    response = await client.get("/api/v1/documents")
-    assert response.status_code == 200
-    assert len(response.json()) >= 2
+async def test_list_documents_only_own():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            await ac.post("/api/v1/documents", json={"title": "A Doc", "content": "owned by A"})
+        async with await _client_for(USER_B_TOKEN) as ac:
+            await ac.post("/api/v1/documents", json={"title": "B Doc", "content": "owned by B"})
+        async with await _client_for(USER_A_TOKEN) as ac:
+            resp_a = await ac.get("/api/v1/documents")
+        async with await _client_for(USER_B_TOKEN) as ac:
+            resp_b = await ac.get("/api/v1/documents")
+    app.dependency_overrides.clear()
+
+    titles_a = [d["title"] for d in resp_a.json()]
+    titles_b = [d["title"] for d in resp_b.json()]
+    assert "A Doc" in titles_a and "B Doc" not in titles_a
+    assert "B Doc" in titles_b and "A Doc" not in titles_b
 
 
 @pytest.mark.asyncio
-async def test_get_existing_document(client):
+async def test_get_own_document(client):
     create = await client.post("/api/v1/documents", json={"title": "Fetch Me", "content": "Fetch content"})
     doc_id = create.json()["id"]
     response = await client.get(f"/api/v1/documents/{doc_id}")
     assert response.status_code == 200
     assert response.json()["id"] == doc_id
+
+
+@pytest.mark.asyncio
+async def test_get_other_users_document_returns_404():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            doc_id = (await ac.post("/api/v1/documents", json={"title": "Private", "content": "A only"})).json()["id"]
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.get(f"/api/v1/documents/{doc_id}")
+    app.dependency_overrides.clear()
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -120,12 +156,23 @@ async def test_get_nonexistent_document(client):
 
 
 @pytest.mark.asyncio
-async def test_update_document(client):
+async def test_update_own_document(client):
     create = await client.post("/api/v1/documents", json={"title": "Old Title", "content": "Old content"})
     doc_id = create.json()["id"]
     response = await client.put(f"/api/v1/documents/{doc_id}", json={"title": "New Title"})
     assert response.status_code == 200
     assert response.json()["title"] == "New Title"
+
+
+@pytest.mark.asyncio
+async def test_update_other_users_document_returns_404():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            doc_id = (await ac.post("/api/v1/documents", json={"title": "A Title", "content": "A content"})).json()["id"]
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.put(f"/api/v1/documents/{doc_id}", json={"title": "Hijacked"})
+    app.dependency_overrides.clear()
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -138,13 +185,24 @@ async def test_update_nonexistent_document(client):
 
 
 @pytest.mark.asyncio
-async def test_delete_document(client):
+async def test_delete_own_document(client):
     create = await client.post("/api/v1/documents", json={"title": "Delete Me", "content": "Delete content"})
     doc_id = create.json()["id"]
     response = await client.delete(f"/api/v1/documents/{doc_id}")
     assert response.status_code == 200
     get_response = await client.get(f"/api/v1/documents/{doc_id}")
     assert get_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_other_users_document_returns_404():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            doc_id = (await ac.post("/api/v1/documents", json={"title": "A Only", "content": "content"})).json()["id"]
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.delete(f"/api/v1/documents/{doc_id}")
+    app.dependency_overrides.clear()
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -164,6 +222,17 @@ async def test_deleted_document_not_in_list(client):
 
 
 @pytest.mark.asyncio
+async def test_list_documents_pagination(client):
+    for i in range(5):
+        await client.post("/api/v1/documents", json={"title": f"Doc {i}", "content": f"Content {i}"})
+    response = await client.get("/api/v1/documents?skip=0&limit=2")
+    assert response.status_code == 200
+    assert len(response.json()) == 2
+
+
+# ─── Search ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
 async def test_search_documents(client):
     await client.post("/api/v1/documents", json={"title": "Python Tutorial", "content": "Learn Python basics"})
     await client.post("/api/v1/documents", json={"title": "Java Guide", "content": "Learn Java basics"})
@@ -172,6 +241,18 @@ async def test_search_documents(client):
     results = response.json()
     assert len(results) >= 1
     assert any("Python" in d["title"] or "Python" in d["content"] for d in results)
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_return_other_users_docs():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            await ac.post("/api/v1/documents", json={"title": "Python Tutorial", "content": "Python basics"})
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.get("/api/v1/documents/search?q=Python")
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.asyncio
@@ -188,14 +269,7 @@ async def test_create_document_with_no_tags(client):
     assert response.json()["tags"] is None
 
 
-@pytest.mark.asyncio
-async def test_list_documents_pagination(client):
-    for i in range(5):
-        await client.post("/api/v1/documents", json={"title": f"Doc {i}", "content": f"Content {i}"})
-    response = await client.get("/api/v1/documents?skip=0&limit=2")
-    assert response.status_code == 200
-    assert len(response.json()) == 2
-
+# ─── AI endpoints ────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_summarize_extractive(client):
@@ -213,6 +287,17 @@ async def test_summarize_extractive(client):
 
 
 @pytest.mark.asyncio
+async def test_summarize_other_users_document_returns_404():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            doc_id = (await ac.post("/api/v1/documents", json={"title": "Private", "content": "Sentence one. Sentence two."})).json()["id"]
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.post(f"/api/v1/documents/{doc_id}/summarize", json={"max_length": 50})
+    app.dependency_overrides.clear()
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_summarize_not_found(client):
     response = await client.post(
         "/api/v1/documents/00000000-0000-0000-0000-000000000000/summarize",
@@ -227,8 +312,19 @@ async def test_semantic_search(client):
     await client.post("/api/v1/documents", json={"title": "Cooking", "content": "Recipes food ingredients kitchen"})
     response = await client.post("/api/v1/documents/search/semantic", json={"query": "machine learning AI", "limit": 5})
     assert response.status_code == 200
-    results = response.json()
-    assert isinstance(results, list)
+    assert isinstance(response.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_scoped_to_owner():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            await ac.post("/api/v1/documents", json={"title": "ML Paper", "content": "Deep learning neural networks"})
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.post("/api/v1/documents/search/semantic", json={"query": "deep learning", "limit": 5})
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.asyncio
@@ -238,17 +334,30 @@ async def test_health_endpoint(client):
     assert response.json()["status"] == "healthy"
 
 
-# --- Service layer unit tests ---
+# ─── Service layer unit tests ─────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_service_create_and_get(db_session):
     doc = await document_service.create_document(
-        db_session, DocumentCreate(title="Svc Test", content="Svc content", tags=["a"])
+        db_session,
+        DocumentCreate(title="Svc Test", content="Svc content", tags=["a"]),
+        owner_id="owner-1",
     )
     assert doc.id is not None
-    fetched = await document_service.get_document(db_session, doc.id)
+    fetched = await document_service.get_document(db_session, doc.id, owner_id="owner-1")
     assert fetched is not None
     assert fetched.title == "Svc Test"
+
+
+@pytest.mark.asyncio
+async def test_service_get_wrong_owner_returns_none(db_session):
+    doc = await document_service.create_document(
+        db_session,
+        DocumentCreate(title="Private", content="secret"),
+        owner_id="owner-1",
+    )
+    result = await document_service.get_document(db_session, doc.id, owner_id="owner-2")
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -258,19 +367,31 @@ async def test_service_get_not_found(db_session):
 
 
 @pytest.mark.asyncio
-async def test_service_list_documents(db_session):
-    await document_service.create_document(db_session, DocumentCreate(title="L1", content="C1"))
-    await document_service.create_document(db_session, DocumentCreate(title="L2", content="C2"))
-    docs = await document_service.list_documents(db_session, skip=0, limit=10)
-    assert len(docs) >= 2
+async def test_service_list_documents_scoped(db_session):
+    await document_service.create_document(db_session, DocumentCreate(title="L1", content="C1"), owner_id="u1")
+    await document_service.create_document(db_session, DocumentCreate(title="L2", content="C2"), owner_id="u2")
+    docs_u1 = await document_service.list_documents(db_session, owner_id="u1", skip=0, limit=10)
+    assert len(docs_u1) == 1
+    assert docs_u1[0].title == "L1"
 
 
 @pytest.mark.asyncio
 async def test_service_update_document(db_session):
-    doc = await document_service.create_document(db_session, DocumentCreate(title="Before", content="Old"))
-    updated = await document_service.update_document(db_session, doc.id, DocumentUpdate(title="After"))
+    doc = await document_service.create_document(
+        db_session, DocumentCreate(title="Before", content="Old"), owner_id="u1"
+    )
+    updated = await document_service.update_document(db_session, doc.id, DocumentUpdate(title="After"), owner_id="u1")
     assert updated is not None
     assert updated.title == "After"
+
+
+@pytest.mark.asyncio
+async def test_service_update_wrong_owner_returns_none(db_session):
+    doc = await document_service.create_document(
+        db_session, DocumentCreate(title="Mine", content="Content"), owner_id="u1"
+    )
+    result = await document_service.update_document(db_session, doc.id, DocumentUpdate(title="X"), owner_id="u2")
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -281,11 +402,22 @@ async def test_service_update_not_found(db_session):
 
 @pytest.mark.asyncio
 async def test_service_soft_delete(db_session):
-    doc = await document_service.create_document(db_session, DocumentCreate(title="ToDelete", content="Bye"))
-    deleted = await document_service.soft_delete_document(db_session, doc.id)
+    doc = await document_service.create_document(
+        db_session, DocumentCreate(title="ToDelete", content="Bye"), owner_id="u1"
+    )
+    deleted = await document_service.soft_delete_document(db_session, doc.id, owner_id="u1")
     assert deleted is not None
-    gone = await document_service.get_document(db_session, doc.id)
+    gone = await document_service.get_document(db_session, doc.id, owner_id="u1")
     assert gone is None
+
+
+@pytest.mark.asyncio
+async def test_service_soft_delete_wrong_owner_returns_none(db_session):
+    doc = await document_service.create_document(
+        db_session, DocumentCreate(title="Mine", content="Content"), owner_id="u1"
+    )
+    result = await document_service.soft_delete_document(db_session, doc.id, owner_id="u2")
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -295,15 +427,20 @@ async def test_service_soft_delete_not_found(db_session):
 
 
 @pytest.mark.asyncio
-async def test_service_search(db_session):
-    await document_service.create_document(db_session, DocumentCreate(title="FastAPI guide", content="Learn FastAPI"))
-    results = await document_service.search_documents(db_session, "FastAPI")
-    assert len(results) >= 1
-    results_none = await document_service.search_documents(db_session, "xyznothere")
+async def test_service_search_scoped(db_session):
+    await document_service.create_document(
+        db_session, DocumentCreate(title="FastAPI guide", content="Learn FastAPI"), owner_id="u1"
+    )
+    await document_service.create_document(
+        db_session, DocumentCreate(title="FastAPI deep dive", content="Advanced FastAPI"), owner_id="u2"
+    )
+    results_u1 = await document_service.search_documents(db_session, "FastAPI", owner_id="u1")
+    assert len(results_u1) == 1
+    results_none = await document_service.search_documents(db_session, "xyznothere", owner_id="u1")
     assert results_none == []
 
 
-# --- Auth unit tests ---
+# ─── Auth unit tests ──────────────────────────────────────────
 
 def test_verify_token_valid():
     from jose import jwt
@@ -357,7 +494,7 @@ def test_verify_token_wrong_type():
     assert exc_info.value.status_code == 401
 
 
-# --- AI service unit tests ---
+# ─── AI service unit tests ────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_ai_service_extractive_summary():

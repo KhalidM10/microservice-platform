@@ -18,17 +18,29 @@ async def create_document(db: AsyncSession, data: DocumentCreate, owner_id: Opti
     return doc
 
 
-async def get_document(db: AsyncSession, doc_id: str) -> Optional[Document]:
+async def get_document(
+    db: AsyncSession,
+    doc_id: str,
+    owner_id: Optional[str] = None,
+) -> Optional[Document]:
     result = await db.execute(
         select(Document).where(Document.id == doc_id, Document.is_deleted == False)
     )
-    return result.scalar_one_or_none()
+    doc = result.scalar_one_or_none()
+    if doc and owner_id and doc.owner_id != owner_id:
+        return None
+    return doc
 
 
-async def list_documents(db: AsyncSession, skip: int = 0, limit: int = 10) -> List[Document]:
+async def list_documents(
+    db: AsyncSession,
+    owner_id: str,
+    skip: int = 0,
+    limit: int = 10,
+) -> List[Document]:
     result = await db.execute(
         select(Document)
-        .where(Document.is_deleted == False)
+        .where(Document.is_deleted == False, Document.owner_id == owner_id)
         .offset(skip)
         .limit(limit)
         .order_by(Document.created_at.desc())
@@ -36,20 +48,28 @@ async def list_documents(db: AsyncSession, skip: int = 0, limit: int = 10) -> Li
     return list(result.scalars().all())
 
 
-async def update_document(db: AsyncSession, doc_id: str, data: DocumentUpdate) -> Optional[Document]:
-    doc = await get_document(db, doc_id)
+async def update_document(
+    db: AsyncSession,
+    doc_id: str,
+    data: DocumentUpdate,
+    owner_id: Optional[str] = None,
+) -> Optional[Document]:
+    doc = await get_document(db, doc_id, owner_id=owner_id)
     if not doc:
         return None
-    update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
+    for field, value in data.model_dump(exclude_unset=True).items():
         setattr(doc, field, value)
     await db.flush()
     await db.refresh(doc)
     return doc
 
 
-async def soft_delete_document(db: AsyncSession, doc_id: str) -> Optional[Document]:
-    doc = await get_document(db, doc_id)
+async def soft_delete_document(
+    db: AsyncSession,
+    doc_id: str,
+    owner_id: Optional[str] = None,
+) -> Optional[Document]:
+    doc = await get_document(db, doc_id, owner_id=owner_id)
     if not doc:
         return None
     doc.is_deleted = True
@@ -58,10 +78,15 @@ async def soft_delete_document(db: AsyncSession, doc_id: str) -> Optional[Docume
     return doc
 
 
-async def search_documents(db: AsyncSession, query: str) -> List[Document]:
+async def search_documents(
+    db: AsyncSession,
+    query: str,
+    owner_id: str,
+) -> List[Document]:
     result = await db.execute(
         select(Document).where(
             Document.is_deleted == False,
+            Document.owner_id == owner_id,
             or_(
                 Document.title.ilike(f"%{query}%"),
                 Document.content.ilike(f"%{query}%"),
