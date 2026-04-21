@@ -74,9 +74,10 @@ const docsAPI = {
   semantic:  (q, limit) => apiFetch('/api/v1/documents/search/semantic', {
     method: 'POST', body: JSON.stringify({ query: q, limit }),
   }),
-  summarize: (id, len)  => apiFetch(`/api/v1/documents/${id}/summarize`, {
+  summarize:    (id, len) => apiFetch(`/api/v1/documents/${id}/summarize`, {
     method: 'POST', body: JSON.stringify({ max_length: len }),
   }),
+  suggestTags:  id        => apiFetch(`/api/v1/documents/${id}/tags/suggest`, { method: 'POST' }),
 };
 
 const notifAPI = {
@@ -344,6 +345,7 @@ async function viewDocModal(id) {
       <div class="doc-view-tabs">
         <button class="tab-btn active" onclick="switchTab(this,'content')">Content</button>
         <button class="tab-btn"        onclick="switchTab(this,'summary')">AI Summary ⚡</button>
+        <button class="tab-btn"        onclick="switchTab(this,'tags')">AI Tags 🏷</button>
       </div>
 
       <div id="tab-content" class="tab-pane">
@@ -363,6 +365,14 @@ async function viewDocModal(id) {
           <button class="btn btn-primary btn-sm" onclick="runSummarize('${esc(id)}')">⚡ Generate</button>
         </div>
         <div id="summary-output"></div>
+      </div>
+
+      <div id="tab-tags" class="tab-pane hidden">
+        <div class="summarize-controls">
+          <span style="font-size:13px;color:var(--text-muted)">GPT suggests 3-6 tags based on your document content.</span>
+          <button class="btn btn-primary btn-sm" onclick="runSuggestTags('${esc(id)}')">🏷 Suggest Tags</button>
+        </div>
+        <div id="tags-output"></div>
       </div>
     `;
   } catch (e) {
@@ -393,6 +403,56 @@ async function runSummarize(id) {
     `;
   } catch (e) {
     out.innerHTML = `<div class="error-msg">${esc(e.message)}</div>`;
+  }
+}
+
+async function runSuggestTags(id) {
+  const out = document.getElementById('tags-output');
+  out.innerHTML = '<div class="loading-inline">Asking AI for tag suggestions…</div>';
+  try {
+    const res = await docsAPI.suggestTags(id);
+    if (!res.suggested_tags || res.suggested_tags.length === 0) {
+      out.innerHTML = '<div class="text-muted text-sm">No tags suggested (OpenAI key may not be configured).</div>';
+      return;
+    }
+    out.innerHTML = `
+      <div style="margin-top:12px">
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px">
+          Suggested by <strong>${esc(res.model_used)}</strong> — click to apply:
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">
+          ${res.suggested_tags.map(t => `
+            <button class="tag tag-clickable" style="font-size:13px;padding:5px 14px;cursor:pointer"
+                    onclick="applyTagToDoc('${esc(id)}', '${esc(t)}', this)">${esc(t)}</button>
+          `).join('')}
+        </div>
+        <div id="tag-apply-status" style="font-size:13px;color:var(--success)"></div>
+      </div>
+    `;
+  } catch (e) {
+    out.innerHTML = `<div class="error-msg">${esc(e.message)}</div>`;
+  }
+}
+
+async function applyTagToDoc(id, tag, btn) {
+  const doc = state.docs.find(d => d.id === id);
+  if (!doc) return;
+  const existing = doc.tags || [];
+  if (existing.includes(tag)) {
+    document.getElementById('tag-apply-status').textContent = `"${tag}" is already on this document.`;
+    return;
+  }
+  try {
+    btn.disabled = true;
+    const updated = await docsAPI.update(id, { tags: [...existing, tag] });
+    const idx = state.docs.findIndex(d => d.id === id);
+    if (idx !== -1) state.docs[idx] = updated;
+    btn.classList.add('tag-active');
+    document.getElementById('tag-apply-status').textContent = `✓ "${tag}" added to document.`;
+    renderDocs();
+  } catch (e) {
+    document.getElementById('tag-apply-status').textContent = `Error: ${e.message}`;
+    btn.disabled = false;
   }
 }
 

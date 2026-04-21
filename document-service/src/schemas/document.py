@@ -44,6 +44,11 @@ class SummarizeResponse(BaseModel):
     model_used: str
 
 
+class TagSuggestResponse(BaseModel):
+    suggested_tags: List[str]
+    model_used: str
+
+
 class SemanticSearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     limit: int = Field(default=10, ge=1, le=100)

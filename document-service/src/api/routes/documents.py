@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_db
 from src.core.auth import verify_token
-from src.schemas.document import DocumentCreate, DocumentUpdate, DocumentResponse, SummarizeRequest, SummarizeResponse, SemanticSearchRequest
+from src.schemas.document import DocumentCreate, DocumentUpdate, DocumentResponse, SummarizeRequest, SummarizeResponse, SemanticSearchRequest, TagSuggestResponse
 from src.services import document_service
-from src.services.ai_service import summarize_document, semantic_search
+from src.services.ai_service import summarize_document, semantic_search, suggest_tags
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -111,3 +111,16 @@ async def summarize(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return await summarize_document(doc, data.max_length)
+
+
+@router.post("/{doc_id}/tags/suggest", response_model=TagSuggestResponse)
+async def suggest_document_tags(
+    doc_id: str,
+    db: AsyncSession = Depends(get_db),
+    token: dict = Depends(verify_token),
+):
+    owner_id = token["sub"]
+    doc = await document_service.get_document(db, doc_id, owner_id=owner_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return await suggest_tags(doc)
