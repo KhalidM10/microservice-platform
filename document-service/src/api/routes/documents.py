@@ -20,6 +20,9 @@ async def create_document(
 ):
     owner_id = token["sub"]
     doc = await document_service.create_document(db, data, owner_id=owner_id)
+    # Commit before responding so a subsequent list request always sees the new doc
+    await db.commit()
+    await db.refresh(doc)
 
     from src.core.publisher import publish_document_created
     await publish_document_created(doc)

@@ -3,18 +3,6 @@
    ============================================================ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-[data-theme="dark"] {
-  --primary-light: #1E1B4B;
-  --bg:            #0F172A;
-  --surface:       #1E293B;
-  --surface-2:     #263347;
-  --border:        #334155;
-  --border-hover:  #475569;
-  --text:          #F1F5F9;
-  --text-muted:    #94A3B8;
-  --text-light:    #64748B;
-}
-
 :root {
   --primary:       #4F46E5;
   --primary-hover: #4338CA;
@@ -45,6 +33,19 @@
   --shadow-lg:     0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1);
   --shadow-xl:     0 20px 25px -5px rgba(0,0,0,.1), 0 8px 10px -6px rgba(0,0,0,.1);
   --transition:    0.18s ease;
+}
+
+/* Dark theme — must come AFTER :root so it wins the cascade */
+[data-theme="dark"] {
+  --primary-light: #1E1B4B;
+  --bg:            #0F172A;
+  --surface:       #1E293B;
+  --surface-2:     #263347;
+  --border:        #334155;
+  --border-hover:  #475569;
+  --text:          #F1F5F9;
+  --text-muted:    #94A3B8;
+  --text-light:    #64748B;
 }
 
 body {

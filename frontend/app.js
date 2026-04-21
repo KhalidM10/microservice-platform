@@ -449,7 +449,8 @@ async function applyTagToDoc(id, tag, btn) {
     if (idx !== -1) state.docs[idx] = updated;
     btn.classList.add('tag-active');
     document.getElementById('tag-apply-status').textContent = `✓ "${tag}" added to document.`;
-    renderDocs();
+    renderTagBar();
+    renderDocGrid();
   } catch (e) {
     document.getElementById('tag-apply-status').textContent = `Error: ${e.message}`;
     btn.disabled = false;
@@ -556,6 +557,7 @@ function clearDraft() {
 }
 
 async function submitDocForm(id) {
+  clearTimeout(_draftTimer);
   const titleEl   = document.getElementById('f-title');
   const contentEl = document.getElementById('f-content');
   const tagsEl    = document.getElementById('f-tags');
