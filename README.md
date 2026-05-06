@@ -6,10 +6,14 @@ An AI-powered document management platform built as a production-grade microserv
 architecture covering all phases of a full cloud-native course: single service,
 distributed communication, CI/CD, observability, security, and AI integration.
 
-Users register, authenticate via JWT, create and search documents, and receive
-automatic notifications through RabbitMQ event streaming. Documents can be
-summarised by GPT-3.5-turbo (or an extractive fallback) and searched semantically
-via TF-IDF cosine similarity — no external API required for core functionality.
+Users register, authenticate via JWT, create or upload documents, and receive
+automatic notifications through RabbitMQ event streaming. Uploaded files (PDF,
+DOCX, PNG/JPG/TIFF) have their text extracted automatically via OCR. Every document
+is processed in the background by a Celery worker that generates OpenAI embeddings
+and extracts AI metadata (entities, category, sentiment). Documents can be
+summarised by GPT-4o-mini (extractive fallback when no key is configured) and
+searched semantically using real OpenAI embeddings with TF-IDF cosine similarity as
+a fallback — the core feature set works without an OpenAI API key.
 
 ## Architecture
 
@@ -22,38 +26,47 @@ via TF-IDF cosine similarity — no external API required for core functionality
                            └──────────┬───────────┘
               ┌────────────────────────┼──────────────────────┐
               ▼                        ▼                       ▼
-   ┌──────────────────┐   ┌───────────────────┐  ┌────────────────────────┐
-   │ document-service │   │   auth-service    │  │  notification-service  │
-   │  :8001 (public)  │   │   (internal)      │  │      (internal)        │
-   │  CRUD + AI + JWT │   │  JWT issue/verify │  │  RabbitMQ consumer     │
-   └────────┬─────────┘   └────────┬──────────┘  └──────────┬─────────────┘
-            │  publishes            │                         │ subscribes
-            │  document.created     └──── PostgreSQL ─────────┘
-            │                            (shared host,
-            ▼                             3 databases)
-        RabbitMQ ─────────────────────────────────────►  notification-service
-        :5672 / :15672                                    (consumes & stores)
+   ┌──────────────────────┐  ┌──────────────────┐  ┌─────────────────────────┐
+   │   document-service   │  │   auth-service   │  │   notification-service  │
+   │   :8001 (public)     │  │   (internal)     │  │       (internal)        │
+   │   CRUD · upload/OCR  │  │  JWT issue/verify│  │   RabbitMQ consumer     │
+   │   AI summarize       │  └────────┬─────────┘  └──────────┬──────────────┘
+   │   semantic search    │           │                         │ subscribes
+   └──────────┬───────────┘           └──── PostgreSQL ────────┘
+              │  publishes                  (shared host,
+              │  document.created            3 databases)
+              ▼
+          RabbitMQ ──────────────────────────────► notification-service
+          :5672 / :15672                            (consumes & stores)
 
-   ┌────────────┐   ┌─────────────┐   ┌─────────┐
-   │ Prometheus │   │   Grafana   │   │  Redis  │
-   │   :9090    │   │    :3000    │   │  :6379  │
-   └────────────┘   └─────────────┘   └─────────┘
-      scrapes all 4 services /metrics    rate-limit + AI cache
+   ┌──────────────────────────────────────┐
+   │      document-celery-worker          │
+   │  Celery + Redis broker               │
+   │  • text-embedding-3-small vectors    │
+   │  • GPT-4o-mini entity/cat/sentiment  │
+   └──────────────────────────────────────┘
+
+   ┌────────────┐   ┌─────────────┐   ┌──────────────────────────┐
+   │ Prometheus │   │   Grafana   │   │  Redis                   │
+   │   :9090    │   │    :3000    │   │  rate-limit · AI cache   │
+   └────────────┘   └─────────────┘   │  Celery broker/backend   │
+      scrapes all 4 services /metrics  └──────────────────────────┘
 ```
 
 ## Services
 
-| Service              | Port     | Description                                        |
-|----------------------|----------|----------------------------------------------------|
-| api-gateway          | 8080     | Single entry point — JWT, rate limit, proxy        |
-| document-service     | 8001     | CRUD, AI summarize, semantic search                |
-| auth-service         | internal | Register, login, JWT issue/refresh                 |
-| notification-service | internal | RabbitMQ consumer, stores document events          |
-| PostgreSQL           | 5432     | Persistent storage (3 databases)                   |
-| RabbitMQ             | 5672     | Async messaging; management UI at :15672           |
-| Redis                | 6379     | Rate limiting + AI summary cache (1 h TTL)         |
-| Prometheus           | 9090     | Metrics scraping from all services                 |
-| Grafana              | 3000     | Dashboards — login admin/admin                     |
+| Service                  | Port     | Description                                            |
+|--------------------------|----------|--------------------------------------------------------|
+| api-gateway              | 8080     | Single entry point — JWT, rate limit, proxy            |
+| document-service         | 8001     | CRUD, file upload/OCR, AI summarize, semantic search   |
+| document-celery-worker   | —        | Background AI: embeddings + entity/category/sentiment  |
+| auth-service             | internal | Register, login, JWT issue/refresh                     |
+| notification-service     | internal | RabbitMQ consumer, stores document events              |
+| PostgreSQL               | 5432     | Persistent storage (3 databases)                       |
+| RabbitMQ                 | 5672     | Async messaging; management UI at :15672               |
+| Redis                    | 6379     | Rate limiting, AI cache (1 h TTL), Celery broker       |
+| Prometheus               | 9090     | Metrics scraping from all services                     |
+| Grafana                  | 3000     | Dashboards — login admin/admin                         |
 
 ## Quick Start
 
@@ -64,7 +77,7 @@ cd microservice-platform
 cp .env.example .env
 # Edit .env — at minimum set a strong SECRET_KEY
 
-# 2. Start all services
+# 2. Start all services (includes Celery worker)
 docker-compose up --build -d
 
 # 3. Verify gateway health
@@ -106,7 +119,7 @@ SECRET_KEY="test" APP_NAME="api-gateway" APP_VERSION="1.0.0" \
   pytest tests/ -v --cov=src --cov-fail-under=80
 ```
 
-**Coverage summary:** document-service 82% · auth-service 86% · notification-service 83% · api-gateway 82%
+**Coverage summary:** document-service 80% · auth-service 86% · notification-service 83% · api-gateway 82%
 
 ## API Documentation
 
@@ -131,11 +144,23 @@ TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -d '{"email":"you@example.com","password":"Password123"}' \
   | python3 -c "import sys,json; sys.stdout.write(json.load(sys.stdin)['access_token'])")
 
-# Create document
+# Create document (text)
 curl -X POST http://localhost:8080/api/v1/documents \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"My Doc","content":"Long text here...","tags":["demo"]}'
+
+# Upload a file (PDF / DOCX / PNG — text extracted automatically)
+curl -X POST http://localhost:8080/api/v1/documents/upload \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@report.pdf" \
+  -F "title=Q4 Report" \
+  -F "tags=finance,2024"
+
+# Check background AI processing status
+curl http://localhost:8080/api/v1/documents/{id}/status \
+  -H "Authorization: Bearer $TOKEN"
+# → {"status":"completed","has_embedding":true,"has_ai_metadata":true}
 
 # AI summarize
 curl -X POST http://localhost:8080/api/v1/documents/{id}/summarize \
@@ -143,11 +168,17 @@ curl -X POST http://localhost:8080/api/v1/documents/{id}/summarize \
   -H "Content-Type: application/json" \
   -d '{"max_length":100}'
 
-# Semantic search
+# AI tag suggestions
+curl -X POST http://localhost:8080/api/v1/documents/{id}/tags/suggest \
+  -H "Authorization: Bearer $TOKEN"
+# → {"suggested_tags":["python","fastapi","async"],"model_used":"gpt-4o-mini"}
+
+# Semantic search (uses OpenAI embeddings if key configured, TF-IDF otherwise)
 curl -X POST http://localhost:8080/api/v1/documents/search/semantic \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query":"machine learning concepts","limit":5}'
+# → {"results":[...],"mode":"embedding","total":3}
 
 # Notifications (auto-created by RabbitMQ event)
 curl http://localhost:8080/api/v1/notifications \
@@ -193,41 +224,49 @@ Docker Hub images: `{DOCKER_USERNAME}/mindcampus-{service}:{sha}`
 
 ## AI Features
 
-See [docs/ai-features.md](docs/ai-features.md) for full documentation.
+See [docs/ai-features.md](docs/ai-features.md) and [docs/openai-integration.md](docs/openai-integration.md) for full documentation.
 
-| Feature | Endpoint | Model |
-|---|---|---|
-| Summarization | `POST /documents/{id}/summarize` | GPT-3.5-turbo / extractive fallback |
-| Semantic search | `POST /documents/search/semantic` | TF-IDF cosine similarity |
+| Feature | Endpoint | Model | Fallback |
+|---|---|---|---|
+| Summarization | `POST /documents/{id}/summarize` | GPT-4o-mini | Extractive (no key needed) |
+| Tag suggestion | `POST /documents/{id}/tags/suggest` | GPT-4o-mini | Empty list |
+| Semantic search | `POST /documents/search/semantic` | text-embedding-3-small | TF-IDF cosine similarity |
+| Entity extraction | background (Celery) | GPT-4o-mini | Skipped |
+| Category/sentiment | background (Celery) | GPT-4o-mini | Skipped |
+| OCR / text extraction | `POST /documents/upload` | pdfplumber · Tesseract | Raw UTF-8 |
+
+All AI features degrade gracefully: set `OPENAI_API_KEY=` to disable external calls entirely.
 
 ## Security
 
 See [security-design-report.md](security-design-report.md) for the full report.
 
-- JWT (HS256): access 30 min · refresh 7 days
+- JWT (HS256): access 30 min · refresh 7 days · email claim embedded
 - bcrypt password hashing
 - Rate limiting: 10/100/1000 req/min (guest/user/admin) via Redis
 - Security headers: HSTS, CSP, X-Frame-Options, X-XSS-Protection
 - Circuit breaker: tenacity 3× retry → 503
+- Non-root containers (appuser) in all Python Dockerfiles
 - OWASP Top 10 checklist in the report
 
 See [reliability-report.md](reliability-report.md) for failure modes and runbooks.
 
 ## Environment Variables
 
-| Variable                    | Service          | Description                          |
-|-----------------------------|------------------|--------------------------------------|
-| `SECRET_KEY`                | all              | JWT signing key (keep secret!)       |
-| `DOCUMENT_DATABASE_URL`     | document-service | PostgreSQL connection string         |
-| `AUTH_DATABASE_URL`         | auth-service     | PostgreSQL connection string         |
-| `NOTIFICATION_DATABASE_URL` | notification     | PostgreSQL connection string         |
-| `RABBITMQ_URL`              | doc + notif      | amqp://user:pass@host:5672/          |
-| `REDIS_URL`                 | gateway + doc    | redis://host:6379                    |
-| `OPENAI_API_KEY`            | document-service | Optional — falls back if not set     |
-| `POSTGRES_USER`             | postgres         | DB superuser                         |
-| `POSTGRES_PASSWORD`         | postgres         | DB superuser password                |
-| `POSTGRES_DB`               | postgres         | Initial database name                |
-| `GF_SECURITY_ADMIN_PASSWORD`| grafana          | Grafana admin password               |
+| Variable                    | Service               | Description                              |
+|-----------------------------|-----------------------|------------------------------------------|
+| `SECRET_KEY`                | all                   | JWT signing key (keep secret!)           |
+| `DOCUMENT_DATABASE_URL`     | document-service      | PostgreSQL connection string             |
+| `AUTH_DATABASE_URL`         | auth-service          | PostgreSQL connection string             |
+| `NOTIFICATION_DATABASE_URL` | notification          | PostgreSQL connection string             |
+| `RABBITMQ_URL`              | doc + notif           | amqp://user:pass@host:5672/              |
+| `REDIS_URL`                 | gateway + doc + celery| redis://host:6379                        |
+| `OPENAI_API_KEY`            | document-service      | Optional — all AI falls back if not set  |
+| `UPLOAD_DIR`                | document-service      | File storage path (default /app/uploads) |
+| `POSTGRES_USER`             | postgres              | DB superuser                             |
+| `POSTGRES_PASSWORD`         | postgres              | DB superuser password                    |
+| `POSTGRES_DB`               | postgres              | Initial database name                    |
+| `GF_SECURITY_ADMIN_PASSWORD`| grafana               | Grafana admin password                   |
 
 ## Deployment (Kubernetes)
 
