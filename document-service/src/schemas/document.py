@@ -1,5 +1,6 @@
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List, Any
+import json
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal, Optional, List, Any
 from datetime import datetime
 
 
@@ -23,11 +24,31 @@ class DocumentResponse(BaseModel):
     title: str
     content: str
     file_path: Optional[str]
+    file_name: Optional[str]
+    file_size: Optional[int]
+    mime_type: Optional[str]
     owner_id: Optional[str]
     created_at: datetime
     updated_at: datetime
     is_deleted: bool
     tags: Optional[List[str]]
+    word_count: Optional[int] = None
+    language: Optional[str] = None
+    page_count: Optional[int] = None
+    entities: Optional[Any] = None
+    category: Optional[str] = None
+    sentiment: Optional[str] = None
+    processing_status: Optional[str] = "completed"
+
+    @field_validator("entities", mode="before")
+    @classmethod
+    def _parse_entities(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                return None
+        return v
 
 
 class SummarizeRequest(BaseModel):
@@ -63,3 +84,9 @@ class SemanticSearchResult(BaseModel):
     owner_id: Optional[str]
     similarity_score: float
     tags: Optional[List[str]]
+
+
+class SemanticSearchResponse(BaseModel):
+    results: List[SemanticSearchResult]
+    mode: Literal["embedding", "tfidf"]
+    total: int

@@ -57,6 +57,23 @@ async function apiFetch(path, options = {}) {
   return res.json();
 }
 
+async function apiUpload(path, formData) {
+  const headers = {};
+  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, { method: 'POST', headers, body: formData });
+  } catch {
+    throw new Error('Cannot reach the server. Is the API gateway running?');
+  }
+  if (res.status === 401) { doLogout(); return null; }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Upload failed (${res.status})`);
+  }
+  return res.json();
+}
+
 const authAPI = {
   register: d  => apiFetch('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(d) }),
   login:    d  => apiFetch('/api/v1/auth/login',    { method: 'POST', body: JSON.stringify(d) }),
@@ -78,6 +95,11 @@ const docsAPI = {
     method: 'POST', body: JSON.stringify({ max_length: len }),
   }),
   suggestTags:  id        => apiFetch(`/api/v1/documents/${id}/tags/suggest`, { method: 'POST' }),
+  upload:       formData  => apiUpload('/api/v1/documents/upload', formData),
+};
+
+const statusAPI = {
+  get: id => apiFetch(`/api/v1/documents/${id}/status`),
 };
 
 const notifAPI = {
@@ -117,6 +139,13 @@ function esc(str) {
   if (str == null) return '';
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+function formatFileSize(bytes) {
+  if (!bytes)             return '';
+  if (bytes < 1024)       return `${bytes} B`;
+  if (bytes < 1024*1024)  return `${(bytes/1024).toFixed(1)} KB`;
+  return `${(bytes/(1024*1024)).toFixed(1)} MB`;
+}
+
 function fmtDate(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleDateString('en-US', { year:'numeric', month:'short', day:'numeric' });
@@ -272,6 +301,29 @@ function updateDocStats() {
   if (g('stat-notifs')) g('stat-notifs').textContent = state.unreadCount;
 }
 
+async function pollDocumentStatus(docId, maxAttempts = 20) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const s = await statusAPI.get(docId);
+      if (s?.status === 'completed' || s?.status === 'failed') {
+        const updated = await docsAPI.get(docId).catch(() => null);
+        if (updated) {
+          const idx = state.docs.findIndex(d => d.id === docId);
+          if (idx !== -1) {
+            state.docs[idx] = updated;
+            renderDocGrid();
+          }
+          if (s.status === 'completed') {
+            toast(`AI processing complete for "${updated.title}"`, 'success');
+          }
+        }
+        return;
+      }
+    } catch (_) { /* ignore, keep polling */ }
+  }
+}
+
 function changePage(dir) {
   const total = filteredDocs().length;
   const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
@@ -315,7 +367,7 @@ function renderDocGrid() {
   grid.innerHTML = page.map(doc => `
     <div class="doc-card" data-id="${esc(doc.id)}">
       <div class="doc-card-header">
-        <h3 class="doc-title">${esc(doc.title)}</h3>
+        <h3 class="doc-title">${esc(doc.title)}${doc.file_name ? ' <span class="file-badge" title="' + esc(doc.file_name) + '">📎</span>' : ''}${(doc.processing_status === 'pending' || doc.processing_status === 'processing') ? ' <span class="processing-badge" title="AI processing in background">⏳</span>' : ''}</h3>
         <div class="doc-actions" onclick="event.stopPropagation()">
           <button class="btn-icon" title="View & Summarize" onclick="viewDocModal('${esc(doc.id)}')">👁</button>
           <button class="btn-icon" title="Edit"             onclick="showDocFormModal('${esc(doc.id)}')">✏️</button>
@@ -346,9 +398,15 @@ async function viewDocModal(id) {
         <button class="tab-btn active" onclick="switchTab(this,'content')">Content</button>
         <button class="tab-btn"        onclick="switchTab(this,'summary')">AI Summary ⚡</button>
         <button class="tab-btn"        onclick="switchTab(this,'tags')">AI Tags 🏷</button>
+        <button class="tab-btn"        onclick="switchTab(this,'info')">ℹ️ Info</button>
       </div>
 
       <div id="tab-content" class="tab-pane">
+        ${doc.file_name ? `<div class="file-info-bar">
+          <span>📎 <strong>${esc(doc.file_name)}</strong></span>
+          ${doc.mime_type ? `<span class="tag">${esc(doc.mime_type)}</span>` : ''}
+          ${doc.file_size ? `<span class="text-muted" style="font-size:12px">${formatFileSize(doc.file_size)}</span>` : ''}
+        </div>` : ''}
         <div class="doc-content-full">${esc(doc.content || '')}</div>
         ${(doc.tags||[]).length ? `<div class="doc-view-tags mt-16">${tagsHTML(doc.tags)}</div>` : ''}
         <div class="text-light text-sm mt-16">
@@ -373,6 +431,10 @@ async function viewDocModal(id) {
           <button class="btn btn-primary btn-sm" onclick="runSuggestTags('${esc(id)}')">🏷 Suggest Tags</button>
         </div>
         <div id="tags-output"></div>
+      </div>
+
+      <div id="tab-info" class="tab-pane hidden">
+        ${buildMetadataTab(doc)}
       </div>
     `;
   } catch (e) {
@@ -434,6 +496,44 @@ async function runSuggestTags(id) {
   }
 }
 
+function buildMetadataTab(doc) {
+  const readingTime = doc.word_count ? Math.ceil(doc.word_count / 200) : null;
+  const sentimentIcon = { positive: '😊', neutral: '😐', negative: '😔' };
+  const languageNames = { en:'English', fr:'French', de:'German', es:'Spanish', pt:'Portuguese', it:'Italian', nl:'Dutch', ru:'Russian', zh:'Chinese', ja:'Japanese', ar:'Arabic' };
+
+  const basicRows = [
+    doc.word_count != null ? `<div class="meta-row"><span class="meta-label">Words</span><span class="meta-value">${doc.word_count.toLocaleString()}</span></div>` : '',
+    readingTime          ? `<div class="meta-row"><span class="meta-label">Reading time</span><span class="meta-value">~${readingTime} min</span></div>` : '',
+    doc.language         ? `<div class="meta-row"><span class="meta-label">Language</span><span class="meta-value">${languageNames[doc.language] || doc.language.toUpperCase()}</span></div>` : '',
+    doc.page_count       ? `<div class="meta-row"><span class="meta-label">Pages</span><span class="meta-value">${doc.page_count}</span></div>` : '',
+    doc.file_size        ? `<div class="meta-row"><span class="meta-label">File size</span><span class="meta-value">${formatFileSize(doc.file_size)}</span></div>` : '',
+  ].filter(Boolean).join('');
+
+  const aiRows = [
+    doc.category ? `<div class="meta-row"><span class="meta-label">Category</span><span class="meta-value meta-category">${esc(doc.category)}</span></div>` : '',
+    doc.sentiment ? `<div class="meta-row"><span class="meta-label">Sentiment</span><span class="meta-value sentiment-${esc(doc.sentiment)}">${sentimentIcon[doc.sentiment] || ''} ${esc(doc.sentiment)}</span></div>` : '',
+  ].filter(Boolean).join('');
+
+  const e = doc.entities || {};
+  const hasEntities = (e.people?.length || e.organizations?.length || e.locations?.length);
+  const entitiesHTML = hasEntities ? `
+    <div class="entities-section">
+      <div class="entities-title">Named Entities</div>
+      ${e.people?.length        ? `<div class="entity-group"><span class="entity-type">👤 People</span><span class="entity-tags">${e.people.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</span></div>` : ''}
+      ${e.organizations?.length ? `<div class="entity-group"><span class="entity-type">🏢 Organizations</span><span class="entity-tags">${e.organizations.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</span></div>` : ''}
+      ${e.locations?.length     ? `<div class="entity-group"><span class="entity-type">📍 Locations</span><span class="entity-tags">${e.locations.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</span></div>` : ''}
+    </div>` : '';
+
+  const hasAny = basicRows || aiRows || hasEntities;
+  return hasAny ? `
+    <div class="metadata-panel">
+      ${basicRows ? `<div class="meta-section"><div class="meta-section-title">Document Stats</div>${basicRows}</div>` : ''}
+      ${aiRows    ? `<div class="meta-section"><div class="meta-section-title">AI Analysis</div>${aiRows}</div>` : ''}
+      ${entitiesHTML}
+    </div>` :
+    `<div class="text-muted" style="padding:24px 0;text-align:center;font-size:14px">No metadata available — re-create the document with an OpenAI key configured.</div>`;
+}
+
 async function applyTagToDoc(id, tag, btn) {
   const doc = state.docs.find(d => d.id === id);
   if (!doc) return;
@@ -466,44 +566,77 @@ function showDocFormModal(id) {
   const draft = !id ? JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null') : null;
 
   openModal(doc ? 'Edit Document' : 'New Document', `
-    <form id="doc-form" class="form-stack" onsubmit="return false">
-      <div class="form-group">
-        <label for="f-title">Title <span style="color:var(--danger)">*</span></label>
-        <input id="f-title" type="text" class="form-input" required
-               value="${doc ? esc(doc.title) : esc(draft?.title || '')}"
-               placeholder="Document title">
-      </div>
-      <div class="form-group">
-        <label for="f-content">
-          Content <span style="color:var(--danger)">*</span>
-          ${draft && !id ? '<span class="draft-badge">Draft restored</span>' : ''}
-        </label>
-        <div class="editor-wrap">
-          <textarea id="f-content" class="form-textarea editor-textarea" required
-                    placeholder="Write your document content here…"
-                    rows="11">${doc ? esc(doc.content || '') : esc(draft?.content || '')}</textarea>
-          <div class="editor-meta">
-            <span id="word-count">0 words</span>
-            <span id="char-count">0 / 50,000 chars</span>
-            <span id="draft-saved" class="draft-saved-indicator hidden">✓ Draft saved</span>
+    ${!id ? `<div class="doc-view-tabs" style="margin-bottom:16px">
+      <button class="tab-btn active" id="form-tab-write" onclick="switchFormTab('write')">✏️ Write</button>
+      <button class="tab-btn" id="form-tab-upload" onclick="switchFormTab('upload')">📎 Upload File</button>
+    </div>` : ''}
+    <div id="form-pane-write">
+      <form id="doc-form" class="form-stack" onsubmit="return false">
+        <div class="form-group">
+          <label for="f-title">Title <span style="color:var(--danger)">*</span></label>
+          <input id="f-title" type="text" class="form-input" required
+                 value="${doc ? esc(doc.title) : esc(draft?.title || '')}"
+                 placeholder="Document title">
+        </div>
+        <div class="form-group">
+          <label for="f-content">
+            Content <span style="color:var(--danger)">*</span>
+            ${draft && !id ? '<span class="draft-badge">Draft restored</span>' : ''}
+          </label>
+          <div class="editor-wrap">
+            <textarea id="f-content" class="form-textarea editor-textarea" required
+                      placeholder="Write your document content here…"
+                      rows="11">${doc ? esc(doc.content || '') : esc(draft?.content || '')}</textarea>
+            <div class="editor-meta">
+              <span id="word-count">0 words</span>
+              <span id="char-count">0 / 50,000 chars</span>
+              <span id="draft-saved" class="draft-saved-indicator hidden">✓ Draft saved</span>
+            </div>
           </div>
         </div>
-      </div>
-      <div class="form-group">
-        <label for="f-tags">Tags <span class="label-hint">(comma-separated)</span></label>
-        <input id="f-tags" type="text" class="form-input"
-               value="${doc ? esc((doc.tags||[]).join(', ')) : esc(draft?.tags || '')}"
-               placeholder="e.g. report, finance, 2024">
-      </div>
-      <div class="form-actions">
-        ${!id ? '<button type="button" class="btn btn-ghost btn-sm" onclick="clearDraft()">Clear draft</button>' : ''}
-        <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button type="button" class="btn btn-primary" id="doc-submit-btn"
-                onclick="submitDocForm('${id || ''}')">
-          ${doc ? 'Update' : 'Create Document'}
-        </button>
-      </div>
-    </form>
+        <div class="form-group">
+          <label for="f-tags">Tags <span class="label-hint">(comma-separated)</span></label>
+          <input id="f-tags" type="text" class="form-input"
+                 value="${doc ? esc((doc.tags||[]).join(', ')) : esc(draft?.tags || '')}"
+                 placeholder="e.g. report, finance, 2024">
+        </div>
+        <div class="form-actions">
+          ${!id ? '<button type="button" class="btn btn-ghost btn-sm" onclick="clearDraft()">Clear draft</button>' : ''}
+          <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button type="button" class="btn btn-primary" id="doc-submit-btn"
+                  onclick="submitDocForm('${id || ''}')">
+            ${doc ? 'Update' : 'Create Document'}
+          </button>
+        </div>
+      </form>
+    </div>
+    ${!id ? `<div id="form-pane-upload" class="hidden">
+      <form id="upload-form" class="form-stack" onsubmit="return false">
+        <div class="form-group">
+          <label for="f-upload-file">File <span style="color:var(--danger)">*</span></label>
+          <input id="f-upload-file" type="file" class="form-input"
+                 accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp,.txt,.docx"
+                 onchange="updateUploadPreview(this)">
+          <div class="upload-hint">PDF, PNG, JPG, TIFF, TXT, DOCX · Max 10 MB · Text extracted automatically</div>
+        </div>
+        <div id="upload-preview" class="upload-preview hidden">
+          📄 <span id="upload-file-info"></span>
+        </div>
+        <div class="form-group">
+          <label for="f-upload-title">Title <span class="label-hint">(optional — defaults to filename)</span></label>
+          <input id="f-upload-title" type="text" class="form-input" placeholder="Document title">
+        </div>
+        <div class="form-group">
+          <label for="f-upload-tags">Tags <span class="label-hint">(comma-separated)</span></label>
+          <input id="f-upload-tags" type="text" class="form-input" placeholder="e.g. report, finance, 2024">
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button type="button" class="btn btn-primary" id="upload-submit-btn"
+                  onclick="submitUploadForm()">📎 Upload &amp; Extract Text</button>
+        </div>
+      </form>
+    </div>` : ''}
   `, { wide: true });
 
   // Wire up live word/char count + draft auto-save
@@ -556,6 +689,67 @@ function clearDraft() {
   toast('Draft cleared', 'info');
 }
 
+function switchFormTab(tab) {
+  ['write', 'upload'].forEach(t => {
+    const btn  = document.getElementById(`form-tab-${t}`);
+    const pane = document.getElementById(`form-pane-${t}`);
+    if (btn)  btn.classList.toggle('active', t === tab);
+    if (pane) pane.classList.toggle('hidden', t !== tab);
+  });
+  if (tab === 'write') document.getElementById('f-content')?.focus();
+}
+
+function updateUploadPreview(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const titleInput = document.getElementById('f-upload-title');
+  if (titleInput && !titleInput.value) {
+    titleInput.value = file.name.replace(/\.[^.]+$/, '');
+  }
+  const preview = document.getElementById('upload-preview');
+  const info    = document.getElementById('upload-file-info');
+  if (preview && info) {
+    preview.classList.remove('hidden');
+    info.textContent = `${file.name}  (${formatFileSize(file.size)})`;
+  }
+}
+
+async function submitUploadForm() {
+  const fileInput  = document.getElementById('f-upload-file');
+  const titleInput = document.getElementById('f-upload-title');
+  const tagsInput  = document.getElementById('f-upload-tags');
+  const submitBtn  = document.getElementById('upload-submit-btn');
+
+  if (!fileInput?.files[0]) { toast('Please select a file to upload', 'error'); return; }
+
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  if (titleInput?.value.trim()) formData.append('title', titleInput.value.trim());
+  if (tagsInput?.value.trim())  formData.append('tags',  tagsInput.value.trim());
+
+  submitBtn.disabled    = true;
+  submitBtn.textContent = 'Uploading & Extracting…';
+
+  try {
+    const doc = await docsAPI.upload(formData);
+    state.docs.unshift(doc);
+    closeModal();
+    renderTagBar();
+    renderDocGrid();
+    updateDocStats();
+    if (doc.processing_status === 'pending' || doc.processing_status === 'processing') {
+      toast(`"${doc.title}" uploaded — AI processing in background…`, 'info');
+      pollDocumentStatus(doc.id).catch(() => {});
+    } else {
+      toast(`"${doc.title}" uploaded and text extracted`, 'success');
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+    submitBtn.disabled    = false;
+    submitBtn.textContent = '📎 Upload & Extract Text';
+  }
+}
+
 async function submitDocForm(id) {
   clearTimeout(_draftTimer);
   const titleEl   = document.getElementById('f-title');
@@ -585,7 +779,12 @@ async function submitDocForm(id) {
       const created = await docsAPI.create(payload);
       state.docs.unshift(created);
       localStorage.removeItem(DRAFT_KEY);
-      toast('Document created', 'success');
+      if (created.processing_status === 'pending' || created.processing_status === 'processing') {
+        toast('Document created — AI processing in background…', 'info');
+        pollDocumentStatus(created.id).catch(() => {});
+      } else {
+        toast('Document created', 'success');
+      }
     }
     closeModal();
     renderTagBar();
@@ -667,9 +866,9 @@ async function doSearch() {
   resultsEl.innerHTML = '<div class="loading">Searching…</div>';
   try {
     if (searchMode === 'semantic') {
-      const limit   = parseInt(document.getElementById('sem-limit')?.value, 10) || 5;
-      const results = await docsAPI.semantic(query, limit);
-      renderSearchResults(results, true);
+      const limit    = parseInt(document.getElementById('sem-limit')?.value, 10) || 5;
+      const response = await docsAPI.semantic(query, limit);
+      renderSearchResults(response.results, true, response.mode);
     } else {
       const results = await docsAPI.search(query);
       renderSearchResults(results, false);
@@ -679,7 +878,7 @@ async function doSearch() {
   }
 }
 
-function renderSearchResults(results, isSemantic) {
+function renderSearchResults(results, isSemantic, mode = null) {
   const resultsEl = document.getElementById('search-results');
   if (!results || !results.length) {
     resultsEl.innerHTML = `
@@ -687,9 +886,17 @@ function renderSearchResults(results, isSemantic) {
         <div class="empty-icon">🔍</div>
         <h3>No results found</h3>
         <p>Try different keywords or switch to ${isSemantic ? 'keyword' : 'semantic AI'} search.</p>
+        ${isSemantic && mode === 'tfidf' ? '<p class="text-muted" style="font-size:13px">No document embeddings yet — add an OpenAI key and create documents to enable true semantic search.</p>' : ''}
       </div>`;
     return;
   }
+
+  const modeBadge = mode === 'embedding'
+    ? '<span class="mode-badge mode-embedding">🧠 OpenAI Embeddings</span>'
+    : mode === 'tfidf'
+    ? '<span class="mode-badge mode-tfidf">📊 Keyword Similarity</span>'
+    : '';
+
   const cards = results.map(doc => `
     <div class="doc-card" onclick="viewDocModal('${esc(doc.id)}')">
       <div class="doc-card-header">
@@ -703,7 +910,7 @@ function renderSearchResults(results, isSemantic) {
   resultsEl.innerHTML = `
     <div class="results-meta">
       <strong>${results.length}</strong> result${results.length!==1?'s':''} found
-      ${isSemantic ? '· ranked by semantic similarity' : ''}
+      ${isSemantic ? `· ranked by similarity ${modeBadge}` : ''}
     </div>
     <div class="doc-grid">${cards}</div>`;
 }

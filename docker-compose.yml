@@ -56,10 +56,34 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080"]'
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - document_uploads:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  document-celery-worker:
+    build: ./document-service
+    command: celery -A src.core.celery_app worker --loglevel=info --concurrency=2 -Q ai,celery
+    environment:
+      DATABASE_URL: ${DOCUMENT_DATABASE_URL:-postgresql+asyncpg://postgres:changeme@postgres:5432/documents}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key}
+      DEBUG: "false"
+      APP_NAME: document-celery-worker
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:password@rabbitmq:5672/}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - document_uploads:/app/uploads
+    depends_on:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -154,3 +178,4 @@ volumes:
   postgres_data:
   grafana_data:
   prometheus_data:
+  document_uploads:

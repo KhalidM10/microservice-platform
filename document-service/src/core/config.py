@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     RABBITMQ_URL: str = "amqp://guest:guest@localhost:5672/"
     REDIS_URL: str = "redis://localhost:6379"
     OPENAI_API_KEY: str = ""
+    UPLOAD_DIR: str = "/app/uploads"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

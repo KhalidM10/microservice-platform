@@ -1,7 +1,7 @@
 import uuid
 import json
 from datetime import datetime
-from sqlalchemy import String, Text, Boolean, DateTime, func, TypeDecorator
+from sqlalchemy import String, Text, Boolean, DateTime, Integer, func, TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TEXT
 from src.core.database import Base
@@ -45,3 +45,14 @@ class Document(Base):
     )
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     tags: Mapped[list[str] | None] = mapped_column(JSONArray, nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entities: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    processing_status: Mapped[str] = mapped_column(String(20), nullable=False, default="completed")

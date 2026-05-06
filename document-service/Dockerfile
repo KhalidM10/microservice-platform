@@ -6,11 +6,14 @@ RUN pip install --user --no-cache-dir -r requirements.txt
 
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl tesseract-ocr tesseract-ocr-eng poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r appgroup && useradd -r -g appgroup -m appuser
 
 WORKDIR /app
+
+RUN mkdir -p /app/uploads
 
 COPY --from=builder /root/.local /home/appuser/.local
 COPY src/ ./src/

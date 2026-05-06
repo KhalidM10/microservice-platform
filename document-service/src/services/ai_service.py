@@ -3,7 +3,7 @@ import logging
 import re
 from typing import List
 from src.core.config import settings
-from src.schemas.document import SummarizeResponse, SemanticSearchResult, TagSuggestResponse
+from src.schemas.document import SummarizeResponse, SemanticSearchResponse, SemanticSearchResult, TagSuggestResponse
 
 logger = logging.getLogger(__name__)
 
@@ -168,35 +168,98 @@ async def suggest_tags(document) -> TagSuggestResponse:
     return result
 
 
-async def semantic_search(documents: list, query: str, limit: int) -> List[SemanticSearchResult]:
-    if not documents:
-        return []
+async def generate_embedding(text: str) -> list[float] | None:
+    """Generate an OpenAI text-embedding-3-small vector for the given text."""
+    if not settings.OPENAI_API_KEY:
+        return None
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    try:
+        resp = await client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text[:8191],
+        )
+        return resp.data[0].embedding
+    except Exception as exc:
+        logger.warning("Embedding generation failed: %s", exc)
+        return None
 
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    import numpy as np
+    va = np.array(a, dtype=float)
+    vb = np.array(b, dtype=float)
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
+
+
+def _embedding_search(documents: list, query_embedding: list[float], limit: int) -> list[SemanticSearchResult]:
+    scored = []
+    for doc in documents:
+        if not doc.embedding:
+            continue
+        try:
+            stored = json.loads(doc.embedding) if isinstance(doc.embedding, str) else doc.embedding
+            score = _cosine_similarity(query_embedding, stored)
+            scored.append((score, doc))
+        except Exception:
+            continue
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        SemanticSearchResult(
+            id=str(doc.id),
+            title=doc.title,
+            content=doc.content,
+            owner_id=doc.owner_id,
+            similarity_score=round(score, 4),
+            tags=doc.tags,
+        )
+        for score, doc in scored[:limit]
+        if score > 0.05
+    ]
+
+
+def _tfidf_search(documents: list, query: str, limit: int) -> list[SemanticSearchResult]:
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
+        from sklearn.metrics.pairwise import cosine_similarity as sk_cosine
         import numpy as np
 
         corpus = [f"{doc.title} {doc.content}" for doc in documents]
         vectorizer = TfidfVectorizer(stop_words="english")
         tfidf_matrix = vectorizer.fit_transform(corpus)
         query_vec = vectorizer.transform([query])
-        scores = cosine_similarity(query_vec, tfidf_matrix).flatten()
-
-        ranked_indices = np.argsort(scores)[::-1][:limit]
-        results = []
-        for idx in ranked_indices:
-            if scores[idx] > 0:
-                doc = documents[idx]
-                results.append(SemanticSearchResult(
-                    id=str(doc.id),
-                    title=doc.title,
-                    content=doc.content,
-                    owner_id=doc.owner_id,
-                    similarity_score=float(scores[idx]),
-                    tags=doc.tags,
-                ))
-        return results
+        scores = sk_cosine(query_vec, tfidf_matrix).flatten()
+        ranked = np.argsort(scores)[::-1][:limit]
+        return [
+            SemanticSearchResult(
+                id=str(documents[i].id),
+                title=documents[i].title,
+                content=documents[i].content,
+                owner_id=documents[i].owner_id,
+                similarity_score=round(float(scores[i]), 4),
+                tags=documents[i].tags,
+            )
+            for i in ranked if scores[i] > 0
+        ]
     except Exception as exc:
-        logger.error("Semantic search failed: %s", exc)
+        logger.error("TF-IDF search failed: %s", exc)
         return []
+
+
+async def semantic_search(
+    documents: list, query: str, limit: int
+) -> tuple[list[SemanticSearchResult], str]:
+    """Return (results, mode) where mode is 'embedding' or 'tfidf'."""
+    if not documents:
+        return [], "embedding"
+
+    if settings.OPENAI_API_KEY:
+        query_embedding = await generate_embedding(query)
+        if query_embedding:
+            results = _embedding_search(documents, query_embedding, limit)
+            if results:
+                return results, "embedding"
+
+    return _tfidf_search(documents, query, limit), "tfidf"
