@@ -1,0 +1,6 @@
+[run]
+source = src
+concurrency = thread
+
+[report]
+show_missing = true

@@ -1,3 +1,4 @@
+import io
 import pytest
 import pytest_asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -312,7 +313,10 @@ async def test_semantic_search(client):
     await client.post("/api/v1/documents", json={"title": "Cooking", "content": "Recipes food ingredients kitchen"})
     response = await client.post("/api/v1/documents/search/semantic", json={"query": "machine learning AI", "limit": 5})
     assert response.status_code == 200
-    assert isinstance(response.json(), list)
+    data = response.json()
+    assert "results" in data
+    assert "mode" in data
+    assert isinstance(data["results"], list)
 
 
 @pytest.mark.asyncio
@@ -324,7 +328,7 @@ async def test_semantic_search_scoped_to_owner():
             response = await ac.post("/api/v1/documents/search/semantic", json={"query": "deep learning", "limit": 5})
     app.dependency_overrides.clear()
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json()["results"] == []
 
 
 @pytest.mark.asyncio
@@ -511,7 +515,7 @@ async def test_ai_service_extractive_summary():
 @pytest.mark.asyncio
 async def test_ai_service_semantic_search_empty():
     from src.services.ai_service import semantic_search
-    results = await semantic_search([], "query", 10)
+    results, mode = await semantic_search([], "query", 10)
     assert results == []
 
 
@@ -525,6 +529,7 @@ async def test_ai_service_semantic_search_results():
     doc1.content = "Learn Python with examples"
     doc1.owner_id = "u1"
     doc1.tags = ["python"]
+    doc1.embedding = None
 
     doc2 = MagicMock()
     doc2.id = "d2"
@@ -532,7 +537,652 @@ async def test_ai_service_semantic_search_results():
     doc2.content = "How to cook pasta"
     doc2.owner_id = "u1"
     doc2.tags = []
+    doc2.embedding = None
 
-    results = await semantic_search([doc1, doc2], "Python programming", 10)
+    results, mode = await semantic_search([doc1, doc2], "Python programming", 10)
+    assert mode == "tfidf"
     assert len(results) >= 1
     assert results[0].id == "d1"
+
+
+# ─── Upload endpoint ─────────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def upload_client():
+    """Client with OCR, metadata, filesystem, Celery, and publisher all mocked."""
+    from src.services.ocr_service import ExtractionResult
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_token] = override_verify_token_a
+
+    mock_file_handle = AsyncMock()
+    mock_file_handle.write = AsyncMock()
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_file_handle)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("src.core.publisher.publish_document_created", new_callable=AsyncMock),
+        patch("src.api.routes.documents.extract_text",
+              return_value=ExtractionResult(text="Extracted file content here.", page_count=2)),
+        patch("src.api.routes.documents.extract_basic_metadata",
+              return_value={"word_count": 4, "language": "en"}),
+        patch("aiofiles.open", return_value=mock_cm),
+        patch("pathlib.Path.mkdir"),
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_upload_document_txt_file(upload_client):
+    response = await upload_client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("report.txt", io.BytesIO(b"Hello world content"), "text/plain")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["title"] == "report"
+    assert data["owner_id"] == USER_A_TOKEN["sub"]
+    assert data["content"] == "Extracted file content here."
+
+
+@pytest.mark.asyncio
+async def test_upload_document_custom_title_and_tags(upload_client):
+    response = await upload_client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("notes.txt", io.BytesIO(b"Some notes"), "text/plain")},
+        data={"title": "My Custom Title", "tags": "tag1, tag2"},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["title"] == "My Custom Title"
+    assert set(data["tags"]) == {"tag1", "tag2"}
+
+
+@pytest.mark.asyncio
+async def test_upload_document_includes_file_metadata(upload_client):
+    content = b"File content bytes"
+    response = await upload_client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("document.pdf", io.BytesIO(content), "application/pdf")},
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["file_name"] == "document.pdf"
+    assert data["mime_type"] == "application/pdf"
+    assert data["file_size"] == len(content)
+    assert data["word_count"] == 4
+    assert data["language"] == "en"
+    assert data["page_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_document_too_large_returns_413():
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_token] = override_verify_token_a
+    big_content = b"x" * (10 * 1024 * 1024 + 1)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.post(
+            "/api/v1/documents/upload",
+            files={"file": ("big.txt", io.BytesIO(big_content), "text/plain")},
+        )
+    app.dependency_overrides.clear()
+    assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_upload_document_no_auth_returns_401():
+    app.dependency_overrides[get_db] = override_get_db
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        response = await ac.post(
+            "/api/v1/documents/upload",
+            files={"file": ("test.txt", io.BytesIO(b"content"), "text/plain")},
+        )
+    app.dependency_overrides.clear()
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_upload_document_scoped_to_owner(upload_client):
+    create_resp = await upload_client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("private.txt", io.BytesIO(b"Private content"), "text/plain")},
+    )
+    assert create_resp.status_code == 201
+    doc_id = create_resp.json()["id"]
+
+    app.dependency_overrides[verify_token] = override_verify_token_b
+    response = await upload_client.get(f"/api/v1/documents/{doc_id}")
+    app.dependency_overrides[verify_token] = override_verify_token_a
+    assert response.status_code == 404
+
+
+# ─── Processing status endpoint ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_get_processing_status_own_doc(client):
+    create = await client.post("/api/v1/documents", json={"title": "Status Test", "content": "Content"})
+    doc_id = create.json()["id"]
+    response = await client.get(f"/api/v1/documents/{doc_id}/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["document_id"] == doc_id
+    assert "status" in data
+    assert "has_embedding" in data
+    assert "has_ai_metadata" in data
+
+
+@pytest.mark.asyncio
+async def test_get_processing_status_not_found(client):
+    response = await client.get("/api/v1/documents/00000000-0000-0000-0000-000000000000/status")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_processing_status_other_user_404():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            doc_id = (await ac.post("/api/v1/documents", json={"title": "Mine", "content": "Content"})).json()["id"]
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.get(f"/api/v1/documents/{doc_id}/status")
+    app.dependency_overrides.clear()
+    assert response.status_code == 404
+
+
+# ─── Tag suggestion endpoint ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_suggest_tags_no_openai_returns_empty(client):
+    create = await client.post("/api/v1/documents", json={"title": "Tag Test", "content": "Some content for tagging"})
+    doc_id = create.json()["id"]
+    response = await client.post(f"/api/v1/documents/{doc_id}/tags/suggest")
+    assert response.status_code == 200
+    data = response.json()
+    assert "suggested_tags" in data
+    assert isinstance(data["suggested_tags"], list)
+
+
+@pytest.mark.asyncio
+async def test_suggest_tags_not_found(client):
+    response = await client.post("/api/v1/documents/00000000-0000-0000-0000-000000000000/tags/suggest")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_suggest_tags_other_user_404():
+    with patch("src.core.publisher.publish_document_created", new_callable=AsyncMock):
+        async with await _client_for(USER_A_TOKEN) as ac:
+            doc_id = (await ac.post("/api/v1/documents", json={"title": "Private", "content": "secret content"})).json()["id"]
+        async with await _client_for(USER_B_TOKEN) as ac:
+            response = await ac.post(f"/api/v1/documents/{doc_id}/tags/suggest")
+    app.dependency_overrides.clear()
+    assert response.status_code == 404
+
+
+# ─── OCR service unit tests ─────────────────────────────────────
+
+def test_ocr_extract_text_plain_utf8():
+    from src.services.ocr_service import extract_text
+    result = extract_text(b"Hello world from plain text.", "text/plain", "file.txt")
+    assert "Hello world" in result.text
+    assert result.page_count is None
+
+
+def test_ocr_extract_text_pdf_mocked():
+    from src.services.ocr_service import extract_text
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = "PDF page content"
+    mock_pdf = MagicMock()
+    mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+    mock_pdf.__exit__ = MagicMock(return_value=False)
+    mock_pdf.pages = [mock_page, mock_page]
+    with patch("pdfplumber.open", return_value=mock_pdf):
+        result = extract_text(b"%PDF fake bytes", "application/pdf", "doc.pdf")
+    assert result.text == "PDF page content\n\nPDF page content"
+    assert result.page_count == 2
+
+
+def test_ocr_extract_text_docx_mocked():
+    from src.services.ocr_service import extract_text
+    mock_para = MagicMock()
+    mock_para.text = "Paragraph text"
+    mock_doc = MagicMock()
+    mock_doc.paragraphs = [mock_para]
+    with patch("docx.Document", return_value=mock_doc):
+        result = extract_text(
+            b"fake docx bytes",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "doc.docx",
+        )
+    assert "Paragraph text" in result.text
+    assert result.page_count is None
+
+
+def test_ocr_extract_text_image_mocked():
+    from src.services.ocr_service import extract_text
+    with (
+        patch("pytesseract.image_to_string", return_value="OCR extracted text"),
+        patch("PIL.Image.open", return_value=MagicMock()),
+    ):
+        result = extract_text(b"fake png bytes", "image/png", "scan.png")
+    assert result.text == "OCR extracted text"
+    assert result.page_count is None
+
+
+def test_ocr_extract_text_exception_returns_empty():
+    from src.services.ocr_service import extract_text
+    with patch("pdfplumber.open", side_effect=Exception("corrupt file")):
+        result = extract_text(b"bad bytes", "application/pdf", "broken.pdf")
+    assert result.text == ""
+
+
+def test_ocr_extract_text_unknown_mime_type():
+    from src.services.ocr_service import extract_text
+    result = extract_text(b"Plain data as unknown mime", "application/x-unknown", "mystery.bin")
+    assert "Plain data" in result.text
+
+
+# ─── Metadata service unit tests ────────────────────────────────
+
+def test_metadata_word_count():
+    from src.services.metadata_service import extract_basic_metadata
+    result = extract_basic_metadata("one two three four five")
+    assert result["word_count"] == 5
+
+
+def test_metadata_empty_content():
+    from src.services.metadata_service import extract_basic_metadata
+    result = extract_basic_metadata("")
+    assert result["word_count"] == 0
+    assert result["language"] is None
+
+
+def test_metadata_language_detection_mocked():
+    from src.services.metadata_service import extract_basic_metadata
+    with patch("langdetect.detect", return_value="fr"):
+        result = extract_basic_metadata("Bonjour monde ceci est un texte suffisamment long pour la detection")
+    assert result["language"] == "fr"
+
+
+@pytest.mark.asyncio
+async def test_metadata_ai_no_key_returns_empty():
+    from src.services.metadata_service import extract_ai_metadata
+    doc = MagicMock()
+    doc.id = "test-id"
+    doc.title = "Test"
+    doc.content = "Content"
+    with patch("src.services.metadata_service.settings") as mock_settings:
+        mock_settings.OPENAI_API_KEY = ""
+        result = await extract_ai_metadata(doc)
+    assert result == {}
+
+
+# ─── AI service: cosine similarity & embedding tests ───────────
+
+def test_cosine_similarity_identical_vectors():
+    from src.services.ai_service import _cosine_similarity
+    v = [1.0, 0.0, 0.0]
+    assert abs(_cosine_similarity(v, v) - 1.0) < 1e-6
+
+
+def test_cosine_similarity_orthogonal_vectors():
+    from src.services.ai_service import _cosine_similarity
+    assert abs(_cosine_similarity([1.0, 0.0], [0.0, 1.0])) < 1e-6
+
+
+def test_cosine_similarity_zero_vector():
+    from src.services.ai_service import _cosine_similarity
+    assert _cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
+def test_tfidf_search_returns_best_match():
+    from src.services.ai_service import _tfidf_search
+    doc1 = MagicMock()
+    doc1.id = "d1"; doc1.title = "python guide"; doc1.content = "learn python programming"
+    doc1.owner_id = "u1"; doc1.tags = []
+    doc2 = MagicMock()
+    doc2.id = "d2"; doc2.title = "cooking"; doc2.content = "how to cook pasta"
+    doc2.owner_id = "u1"; doc2.tags = []
+    results = _tfidf_search([doc1, doc2], "python programming", 5)
+    assert len(results) >= 1
+    assert results[0].id == "d1"
+
+
+def test_tfidf_search_empty_corpus():
+    from src.services.ai_service import _tfidf_search
+    assert _tfidf_search([], "query", 5) == []
+
+
+@pytest.mark.asyncio
+async def test_generate_embedding_no_key_returns_none():
+    from src.services.ai_service import generate_embedding
+    with patch("src.services.ai_service.settings") as mock_settings:
+        mock_settings.OPENAI_API_KEY = ""
+        result = await generate_embedding("some text")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_generate_embedding_with_key_mocked():
+    from src.services.ai_service import generate_embedding
+    mock_embedding = [0.1] * 1536
+    mock_response = MagicMock()
+    mock_response.data = [MagicMock(embedding=mock_embedding)]
+    mock_client = AsyncMock()
+    mock_client.embeddings.create = AsyncMock(return_value=mock_response)
+    with (
+        patch("src.services.ai_service.settings") as mock_settings,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+    ):
+        mock_settings.OPENAI_API_KEY = "sk-fake-key"
+        result = await generate_embedding("test text")
+    assert result == mock_embedding
+
+
+# ─── OpenAI-path unit tests (ai_service + metadata_service) ────
+
+def _make_chat_response(text: str):
+    """Build a minimal mock of an OpenAI chat completions response."""
+    msg = MagicMock()
+    msg.content = text
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=msg)]
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_summarize_document_openai_path():
+    from src.services.ai_service import summarize_document
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_make_chat_response("This is an AI summary.")
+    )
+    doc = MagicMock()
+    doc.id = "s1"; doc.title = "Report"; doc.content = "First. Second. Third."
+    with (
+        patch("src.services.ai_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.ai_service._get_redis", return_value=None),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await summarize_document(doc, max_length=50)
+    assert result.summary == "This is an AI summary."
+    assert result.model_used != "extractive-fallback"
+
+
+@pytest.mark.asyncio
+async def test_summarize_document_redis_cache_hit():
+    import json as _json
+    from src.services.ai_service import summarize_document
+    from src.schemas.document import SummarizeResponse
+    cached_resp = SummarizeResponse(
+        document_id="cached-id", summary="Cached summary",
+        original_length=10, summary_length=2, model_used="gpt-4o-mini",
+    )
+    mock_redis = MagicMock()
+    mock_redis.get = MagicMock(return_value=_json.dumps(cached_resp.model_dump()))
+    doc = MagicMock()
+    doc.id = "cached-id"
+    with patch("src.services.ai_service._get_redis", return_value=mock_redis):
+        result = await summarize_document(doc, max_length=50)
+    assert result.summary == "Cached summary"
+    assert result.model_used == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_suggest_tags_openai_path():
+    import json as _json
+    from src.services.ai_service import suggest_tags
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_make_chat_response('["python", "fastapi", "async"]')
+    )
+    doc = MagicMock()
+    doc.id = "t1"; doc.title = "FastAPI Guide"; doc.content = "Python async web framework guide."
+    with (
+        patch("src.services.ai_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.ai_service._get_redis", return_value=None),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await suggest_tags(doc)
+    assert set(result.suggested_tags) == {"python", "fastapi", "async"}
+
+
+@pytest.mark.asyncio
+async def test_suggest_tags_redis_cache_hit():
+    import json as _json
+    from src.services.ai_service import suggest_tags
+    from src.schemas.document import TagSuggestResponse
+    cached = TagSuggestResponse(suggested_tags=["cached", "tag"], model_used="gpt-4o-mini")
+    mock_redis = MagicMock()
+    mock_redis.get = MagicMock(return_value=_json.dumps(cached.model_dump()))
+    doc = MagicMock()
+    doc.id = "cache-tag-id"
+    with patch("src.services.ai_service._get_redis", return_value=mock_redis):
+        result = await suggest_tags(doc)
+    assert result.suggested_tags == ["cached", "tag"]
+
+
+@pytest.mark.asyncio
+async def test_embedding_search_with_stored_embeddings():
+    import json as _json
+    from src.services.ai_service import _embedding_search
+    import numpy as np
+    v = [1.0, 0.0, 0.0]
+    doc = MagicMock()
+    doc.id = "emb1"; doc.title = "T"; doc.content = "C"; doc.owner_id = "u1"; doc.tags = []
+    doc.embedding = _json.dumps(v)
+    results = _embedding_search([doc], v, limit=5)
+    assert len(results) == 1
+    assert results[0].similarity_score > 0.99
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_uses_embedding_when_available():
+    import json as _json
+    from src.services.ai_service import semantic_search
+    v = [1.0, 0.0, 0.0]
+    doc = MagicMock()
+    doc.id = "emb2"; doc.title = "Embeddings"; doc.content = "vector search"
+    doc.owner_id = "u1"; doc.tags = []; doc.embedding = _json.dumps(v)
+    mock_embedding = [1.0, 0.0, 0.0]
+    with (
+        patch("src.services.ai_service.settings") as ms,
+        patch("src.services.ai_service.generate_embedding", new=AsyncMock(return_value=mock_embedding)),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        results, mode = await semantic_search([doc], "vector search", 5)
+    assert mode == "embedding"
+    assert len(results) >= 1
+
+
+@pytest.mark.asyncio
+async def test_metadata_ai_extraction_with_openai():
+    import json as _json
+    from src.services.metadata_service import extract_ai_metadata
+    expected = {
+        "entities": {"people": ["Alice"], "organizations": ["ACME"], "locations": []},
+        "category": "report",
+        "sentiment": "positive",
+    }
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_make_chat_response(_json.dumps(expected))
+    )
+    doc = MagicMock()
+    doc.id = "meta1"; doc.title = "Report"; doc.content = "Alice from ACME presented results."
+    with (
+        patch("src.services.metadata_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.metadata_service._get_redis", return_value=None),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await extract_ai_metadata(doc)
+    assert result["category"] == "report"
+    assert result["sentiment"] == "positive"
+    assert result["entities"]["people"] == ["Alice"]
+
+
+@pytest.mark.asyncio
+async def test_metadata_ai_extraction_redis_cache_hit():
+    import json as _json
+    from src.services.metadata_service import extract_ai_metadata
+    cached = {"entities": {}, "category": "note", "sentiment": "neutral"}
+    mock_redis = MagicMock()
+    mock_redis.get = MagicMock(return_value=_json.dumps(cached))
+    doc = MagicMock()
+    doc.id = "meta-cached"
+    with (
+        patch("src.services.metadata_service.settings") as ms,
+        patch("src.services.metadata_service._get_redis", return_value=mock_redis),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await extract_ai_metadata(doc)
+    assert result["category"] == "note"
+
+
+# ─── Coverage gap-fillers: _get_redis paths & exception branches ─
+
+def test_ai_service_get_redis_initialises_client():
+    from src.services import ai_service
+    mock_redis = MagicMock()
+    original = ai_service._redis_client
+    with patch("redis.Redis.from_url", return_value=mock_redis):
+        ai_service._redis_client = None
+        result = ai_service._get_redis()
+    ai_service._redis_client = original
+    assert result is mock_redis
+
+
+def test_ai_service_get_redis_returns_existing_client():
+    from src.services import ai_service
+    sentinel = MagicMock()
+    original = ai_service._redis_client
+    ai_service._redis_client = sentinel
+    result = ai_service._get_redis()
+    ai_service._redis_client = original
+    assert result is sentinel
+
+
+def test_metadata_get_redis_initialises_client():
+    from src.services import metadata_service
+    mock_redis = MagicMock()
+    original = metadata_service._redis_client
+    with patch("redis.Redis.from_url", return_value=mock_redis):
+        metadata_service._redis_client = None
+        result = metadata_service._get_redis()
+    metadata_service._redis_client = original
+    assert result is mock_redis
+
+
+def test_metadata_language_detect_exception_handled():
+    from src.services.metadata_service import extract_basic_metadata
+    with patch("langdetect.detect", side_effect=Exception("no language")):
+        result = extract_basic_metadata("This string is long enough to trigger the language detection code path here")
+    assert result["language"] is None
+    assert result["word_count"] > 0
+
+
+@pytest.mark.asyncio
+async def test_metadata_ai_extraction_with_redis_cache_write():
+    import json as _json
+    from src.services.metadata_service import extract_ai_metadata
+    expected = {"entities": {}, "category": "article", "sentiment": "neutral"}
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_make_chat_response(_json.dumps(expected))
+    )
+    mock_redis = MagicMock()
+    mock_redis.get = MagicMock(return_value=None)
+    mock_redis.setex = MagicMock()
+    doc = MagicMock()
+    doc.id = "redis-write-id"; doc.title = "T"; doc.content = "C"
+    with (
+        patch("src.services.metadata_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.metadata_service._get_redis", return_value=mock_redis),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await extract_ai_metadata(doc)
+    assert result["category"] == "article"
+    mock_redis.setex.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_metadata_ai_extraction_openai_failure_returns_empty():
+    from src.services.metadata_service import extract_ai_metadata
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=Exception("OpenAI down"))
+    doc = MagicMock()
+    doc.id = "fail-id"; doc.title = "T"; doc.content = "C"
+    with (
+        patch("src.services.metadata_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.metadata_service._get_redis", return_value=None),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await extract_ai_metadata(doc)
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_summarize_openai_fallback_to_extractive():
+    from src.services.ai_service import summarize_document
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=Exception("all models failed"))
+    doc = MagicMock()
+    doc.id = "fallback-id"; doc.title = "T"
+    doc.content = "First sentence here. Second sentence follows. Third sentence ends."
+    with (
+        patch("src.services.ai_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.ai_service._get_redis", return_value=None),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await summarize_document(doc, max_length=30)
+    assert result.model_used == "extractive-fallback"
+
+
+@pytest.mark.asyncio
+async def test_suggest_tags_openai_failure_returns_error():
+    from src.services.ai_service import suggest_tags
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=Exception("model error"))
+    doc = MagicMock()
+    doc.id = "tag-fail"; doc.title = "T"; doc.content = "C"
+    with (
+        patch("src.services.ai_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.ai_service._get_redis", return_value=None),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await suggest_tags(doc)
+    assert result.suggested_tags == []
+
+
+@pytest.mark.asyncio
+async def test_suggest_tags_redis_cache_write():
+    import json as _json
+    from src.services.ai_service import suggest_tags
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create = AsyncMock(
+        return_value=_make_chat_response('["ml", "ai", "data"]')
+    )
+    mock_redis = MagicMock()
+    mock_redis.get = MagicMock(return_value=None)
+    mock_redis.setex = MagicMock()
+    doc = MagicMock()
+    doc.id = "tags-redis-write"; doc.title = "AI Paper"; doc.content = "Machine learning content"
+    with (
+        patch("src.services.ai_service.settings") as ms,
+        patch("openai.AsyncOpenAI", return_value=mock_client),
+        patch("src.services.ai_service._get_redis", return_value=mock_redis),
+    ):
+        ms.OPENAI_API_KEY = "sk-fake"
+        result = await suggest_tags(doc)
+    assert set(result.suggested_tags) == {"ml", "ai", "data"}
+    mock_redis.setex.assert_called_once()
