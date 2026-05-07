@@ -1,7 +1,8 @@
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import List
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_db
+from src.core.auth import verify_token
 from src.schemas.notification import NotificationResponse
 from src.services import notification_service
 
@@ -10,9 +11,10 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 @router.get("", response_model=List[NotificationResponse])
 async def list_notifications(
-    owner_id: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    token: dict = Depends(verify_token),
 ):
+    owner_id = token["sub"]
     return await notification_service.list_notifications(db, owner_id=owner_id)
 
 
@@ -20,8 +22,12 @@ async def list_notifications(
 async def mark_as_read(
     notification_id: str,
     db: AsyncSession = Depends(get_db),
+    token: dict = Depends(verify_token),
 ):
-    notification = await notification_service.mark_as_read(db, notification_id)
+    notification = await notification_service.get_notification(db, notification_id)
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    return notification
+    if notification.owner_id != token["sub"]:
+        raise HTTPException(status_code=403, detail="Not your notification")
+    updated = await notification_service.mark_as_read(db, notification_id)
+    return updated

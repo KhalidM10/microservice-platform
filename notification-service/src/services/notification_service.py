@@ -35,6 +35,11 @@ async def list_notifications(db: AsyncSession, owner_id: Optional[str] = None) -
     return list(result.scalars().all())
 
 
+async def get_notification(db: AsyncSession, notification_id: str) -> Optional[Notification]:
+    result = await db.execute(select(Notification).where(Notification.id == notification_id))
+    return result.scalar_one_or_none()
+
+
 async def mark_as_read(db: AsyncSession, notification_id: str) -> Optional[Notification]:
     result = await db.execute(select(Notification).where(Notification.id == notification_id))
     notification = result.scalar_one_or_none()
