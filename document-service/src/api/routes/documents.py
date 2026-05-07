@@ -52,7 +52,7 @@ async def create_document(
 @router.get("", response_model=List[DocumentResponse])
 async def list_documents(
     skip: int = Query(default=0, ge=0),
-    limit: int = Query(default=10, ge=1, le=100),
+    limit: int = Query(default=10, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
     token: dict = Depends(verify_token),
 ):
